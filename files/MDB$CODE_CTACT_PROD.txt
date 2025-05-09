@@ -1,0 +1,29 @@
+[Code Table 1.0]
+
+code table mdb$code_person_edu_kind
+
+  row 101
+    intl_id                             "school"
+    user_id                             "S"
+    naming
+      dfltlang                          "School"
+      english                           "School"
+      german                            "Schule"
+
+  row 102
+    intl_id                             "apprentice"
+    user_id                             "A"
+    naming
+      dfltlang                          "Apprenticeship"
+      english                           "Apprenticeship"
+      german                            "Berufsausbildung"
+
+  row 103
+    intl_id                             "studies"
+    user_id                             "AS"
+    naming
+      dfltlang                          "Academic studies"
+      english                           "Academic studies"
+      german                            "Studium"
+
+end code table

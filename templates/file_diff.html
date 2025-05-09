@@ -112,8 +112,8 @@
 
         .line-content {
             padding: 0 8px;
-            white-space: pre;
-            word-break: break-all;
+            white-space: pre-wrap;
+            word-wrap: break-word;
             flex: 1;
         }
 
@@ -164,10 +164,12 @@
                 <div class="diff-side-header">Original</div>
                 <div class="diff-lines">
                     {% for line in original_lines %}
+                        {% if line.number != 1 %}
                         <div class="diff-line {% if line.type == 'remove' %}diff-remove{% elif line.type == 'context' %}diff-context{% endif %}">
                             <span class="line-number">{{ line.number }}</span>
                             <span class="line-content">{{ line.content }}</span>
                         </div>
+                        {% endif %}
                     {% endfor %}
                 </div>
             </div>
@@ -175,10 +177,12 @@
                 <div class="diff-side-header">Modified</div>
                 <div class="diff-lines">
                     {% for line in modified_lines %}
+                        {% if line.number != 1 %}
                         <div class="diff-line {% if line.type == 'add' %}diff-add{% elif line.type == 'context' %}diff-context{% endif %}">
                             <span class="line-number">{{ line.number }}</span>
                             <span class="line-content">{{ line.content }}</span>
                         </div>
+                        {% endif %}
                     {% endfor %}
                 </div>
             </div>

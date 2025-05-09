@@ -144,6 +144,10 @@ class FileComparer(Resource):
         file2_content = request.args.get('file2_content', '')
                 
         try:
+            # Escape special characters in the content
+            file1_content = escape(file1_content)
+            file2_content = escape(file2_content)
+            
             # If content is provided directly, use it
             if file1_content and file2_content:
                 file1_lines = file1_content.splitlines(True)

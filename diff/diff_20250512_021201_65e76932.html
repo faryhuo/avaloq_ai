@@ -163,23 +163,35 @@
             <div class="diff-side">
                 <div class="diff-side-header">Original</div>
                 <div class="diff-lines">
-                    {% for line in original_lines %}
-                        <div class="diff-line {% if line.type == 'remove' %}diff-remove{% elif line.type == 'context' %}diff-context{% endif %}">
-                            <span class="line-number">{{ line.number }}</span>
-                            <span class="line-content">{{ line.content }}</span>
+                    
+                        
+                    
+                        
+                        <div class="diff-line ">
+                            <span class="line-number"></span>
+                            <span class="line-content">@@ -1 +1 @@</span>
                         </div>
-                    {% endfor %}
+                        
+                    
+                        
+                    
                 </div>
             </div>
             <div class="diff-side">
                 <div class="diff-side-header">Modified</div>
                 <div class="diff-lines">
-                    {% for line in modified_lines %}
-                        <div class="diff-line {% if line.type == 'add' %}diff-add{% elif line.type == 'context' %}diff-context{% endif %}">
-                            <span class="line-number">{{ line.number }}</span>
-                            <span class="line-content">{{ line.content }}</span>
+                    
+                        
+                    
+                        
+                        <div class="diff-line ">
+                            <span class="line-number"></span>
+                            <span class="line-content">@@ -1 +1 @@</span>
                         </div>
-                    {% endfor %}
+                        
+                    
+                        
+                    
                 </div>
             </div>
         </div>

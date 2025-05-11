@@ -3,5 +3,5 @@ flask-restx==1.1.0
 python-dotenv==1.0.0
 pandas==2.1.1
 werkzeug==2.3.7
-PyPDF2==3.0.1
+pdfplumber
 markdown==3.5.1

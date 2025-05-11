@@ -9,6 +9,8 @@ import re
 import threading
 import time
 from pathlib import Path
+import pdfplumber
+import sys
 
 app = Flask(__name__)
 api = Api(
@@ -129,89 +131,64 @@ class FileReader(Resource):
 @ns.route('/compare')
 class FileComparer(Resource):
     @ns.doc('compare_files',
-            params={
-                'file1_content': 'Content of the first file (optional)',
-                'file2_content': 'Content of the second file (optional)'
-            },
             responses={
                 200: 'Success',
-                400: 'Invalid input',
+                400: 'Invalid input', 
                 404: 'File not found'
             })
-    def get(self):
+    @ns.expect(ns.model('CompareFiles', {
+        'file1_content': fields.String(required=True, description='Content of first file'),
+        'file2_content': fields.String(required=True, description='Content of second file')
+    }))
+    def post(self):
         """Compare the content of two files or provided content"""
-        file1_content = request.args.get('file1_content', '')
-        file2_content = request.args.get('file2_content', '')
+        file1_content = request.get_json().get('file1_content', '')
+        file2_content = request.get_json().get('file2_content', '')
                 
         try:
-            # Escape special characters in the content
-            file1_content = escape(file1_content)
-            file2_content = escape(file2_content)
-            
             # If content is provided directly, use it
             if file1_content and file2_content:
                 file1_lines = file1_content.splitlines(True)
                 file2_lines = file2_content.splitlines(True)
             
-            # Generate diff
-            diff = list(difflib.unified_diff(
-                file1_lines,
-                file2_lines,
-                lineterm=''
-            ))
+            # Generate diff using ndiff for full file comparison from line 1
+            diff = list(difflib.ndiff(file1_lines, file2_lines))
 
-            # Process diff into original and modified lines
             original_lines = []
             modified_lines = []
             original_line_num = 1
             modified_line_num = 1
 
             for line in diff:
-                if line.startswith('@'):
-                    # Parse the line numbers from the diff header
-                    match = re.search(r'@@ -(\d+),?(\d+)? \+(\d+),?(\d+)? @@', line)
-                    if match:
-                        original_line_num = int(match.group(1))
-                        modified_line_num = int(match.group(3))
-                        original_lines.append({
-                            'type': 'info',
-                            'number': '',
-                            'content': line
-                        })
-                        modified_lines.append({
-                            'type': 'info',
-                            'number': '',
-                            'content': line
-                        })
-                elif line.startswith('-'):
+                if line.startswith('-'):
                     original_lines.append({
                         'type': 'remove',
                         'number': original_line_num,
-                        'content': line[1:]
+                        'content': line[2:]
                     })
                     original_line_num += 1
                 elif line.startswith('+'):
                     modified_lines.append({
                         'type': 'add',
                         'number': modified_line_num,
-                        'content': line[1:]
+                        'content': line[2:]
                     })
                     modified_line_num += 1
-                else:
-                    if not line.startswith('\\'):
-                        original_lines.append({
-                            'type': 'context',
-                            'number': original_line_num,
-                            'content': line
-                        })
-                        modified_lines.append({
-                            'type': 'context',
-                            'number': modified_line_num,
-                            'content': line
-                        })
-                        original_line_num += 1
-                        modified_line_num += 1
-            
+                elif line.startswith(' '):
+                    original_lines.append({
+                        'type': 'context',
+                        'number': original_line_num,
+                        'content': line[2:]
+                    })
+                    modified_lines.append({
+                        'type': 'context',
+                        'number': modified_line_num,
+                        'content': line[2:]
+                    })
+                    original_line_num += 1
+                    modified_line_num += 1
+                # Ignore lines starting with '?'
+
             # Create diff directory if it doesn't exist
             diff_dir = Path('diff')
             diff_dir.mkdir(exist_ok=True)
@@ -232,11 +209,13 @@ class FileComparer(Resource):
             except Exception as e:
                 return jsonify({'status': f'Error saving diff file: {str(e)}'}), 500
             
-            # Return the URL to access the diff file
+            # Return the URL to access the diff file and the structured diff
             diff_url = f'/diff/{filename}'
             return jsonify({
                 'status': 'Success',
-                'diff_url': diff_url
+                'diff_url': diff_url,
+                'original_lines': original_lines,
+                'modified_lines': modified_lines
             })
             
         except Exception as e:
@@ -256,6 +235,51 @@ class DiffViewer(Resource):
             return send_from_directory('diff/', filename)
         except Exception as e:
             return jsonify({'status': f'Error: {str(e)}'}), 404
+
+@ns.route('/doc/<string:filename>')
+class PdfToTextReader(Resource):
+    @ns.doc('pdf_to_text',
+            params={'filename': 'Name of the PDF file to convert'},
+            responses={
+                200: 'Success',
+                400: 'Invalid file name or not a PDF',
+                404: 'File not found',
+                500: 'PDF to text conversion error'
+            })
+    def get(self, filename):
+        """Convert a PDF file to text and return its content"""
+        if not filename or not filename.lower().endswith('.pdf'):
+            return jsonify({'content': '', 'filename': filename, 'status': 'Error: Invalid file name or not a PDF'}), 400
+        pdf_path = os.path.join('doc', filename)
+        if not os.path.exists(pdf_path):
+            return jsonify({'content': '', 'filename': filename, 'status': 'Error: File not found'}), 404
+        try:
+            with pdfplumber.open(pdf_path) as pdf:
+                all_text = ""
+                for page in pdf.pages:
+                    all_text += page.extract_text() or ""
+                    all_text += "\n"
+            return jsonify({'content': all_text, 'filename': filename, 'status': 'Success'})
+        except Exception as e:
+            return jsonify({'content': '', 'filename': filename, 'status': f'Error: {str(e)}'}), 500
+
+def pdf_to_text(pdf_path, txt_path=None):
+    if not os.path.exists(pdf_path):
+        print(f"File not found: {pdf_path}")
+        return
+
+    with pdfplumber.open(pdf_path) as pdf:
+        all_text = ""
+        for page in pdf.pages:
+            all_text += page.extract_text() or ""
+            all_text += "\n"
+
+    if txt_path:
+        with open(txt_path, "w", encoding="utf-8") as f:
+            f.write(all_text)
+        print(f"Text saved to {txt_path}")
+    else:
+        print(all_text)
 
 if __name__ == '__main__':
     # Create files directory if it doesn't exist

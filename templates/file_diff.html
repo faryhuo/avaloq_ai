@@ -157,14 +157,15 @@
 <body>
     <div class="diff-container">
         <div class="diff-header">
-            <h2>File Comparison</h2>
+            <h2>Source Comparison</h2>
+            <button id="toggle-diff-btn" onclick="toggleDiff()">只显示差异</button>
         </div>
         <div class="diff-content">
             <div class="diff-side">
                 <div class="diff-side-header">Original</div>
                 <div class="diff-lines">
                     {% for line in original_lines %}
-                        <div class="diff-line {% if line.type == 'remove' %}diff-remove{% elif line.type == 'context' %}diff-context{% endif %}">
+                        <div class="diff-line{% if line.type == 'remove' %} diff-remove{% endif %}{% if line.type == 'add' %} diff-add{% endif %}{% if line.type == 'context' %} diff-context{% endif %}">
                             <span class="line-number">{{ line.number }}</span>
                             <span class="line-content">{{ line.content }}</span>
                         </div>
@@ -175,7 +176,7 @@
                 <div class="diff-side-header">Modified</div>
                 <div class="diff-lines">
                     {% for line in modified_lines %}
-                        <div class="diff-line {% if line.type == 'add' %}diff-add{% elif line.type == 'context' %}diff-context{% endif %}">
+                        <div class="diff-line{% if line.type == 'add' %} diff-add{% endif %}{% if line.type == 'remove' %} diff-remove{% endif %}{% if line.type == 'context' %} diff-context{% endif %}">
                             <span class="line-number">{{ line.number }}</span>
                             <span class="line-content">{{ line.content }}</span>
                         </div>
@@ -185,4 +186,19 @@
         </div>
     </div>
 </body>
+<script>
+let showOnlyDiff = false;
+function toggleDiff() {
+    showOnlyDiff = !showOnlyDiff;
+    const btn = document.getElementById('toggle-diff-btn');
+    const contextLines = document.querySelectorAll('.diff-context');
+    if (showOnlyDiff) {
+        contextLines.forEach(line => line.style.display = 'none');
+        btn.textContent = 'Show All';
+    } else {
+        contextLines.forEach(line => line.style.display = '');
+        btn.textContent = 'Show Diff';
+    }
+}
+</script>
 </html> 

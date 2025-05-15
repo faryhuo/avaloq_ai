@@ -1,0 +1,725 @@
+[Script 1.0]
+
+public extendable script package doc_oofx
+----------------------------------------------------------------------------
+-- DESCRIPTION
+-- Script package for OTC Option Forex (OOFX)
+----------------------------------------------------------------------------
+is
+
+  ----------------------------------------------------------------------------
+  -- IMPORT
+  ----------------------------------------------------------------------------
+  import           util;
+  import           doc_oofx_util;
+  import           otc_base_lib;
+  import native    doc_mgr#;
+  import native    doc_oofx#;
+  import native    doc_oofx_mtd#;
+  import native    order_type#;
+
+
+  ----------------------------------------------------------------------------
+  -- CONSTANTS
+  ----------------------------------------------------------------------------
+  private c_sep                          constant text   := ',';
+  private c_oof_digi_form                constant number := lookup.code('code_form_light', 'oofx#digi'); --form_id := 945;
+
+  ----------------------------------------------------------------------------
+  -- CONSTANTS WORKFLOW ACTIONS
+  ----------------------------------------------------------------------------
+  c_ct_opn_buy_wfa_id                    constant number := null;
+  c_ct_opn_sell_wfa_id                   constant number := null;
+  c_inc_opn_buy_wfa_id                   constant number := null;
+  c_inc_opn_sell_wfa_id                  constant number := null;
+  c_dec_opn_buy_wfa_id                   constant number := null;
+  c_dec_opn_sell_wfa_id                  constant number := null;
+  c_exe_opn_cash_wfa_id                  constant number := null;
+  c_exe_opn_phys_wfa_id                  constant number := null;
+  c_exe_hold_phys_wfa_id                 constant number := null;
+  c_exe_hold_cash_wfa_id                 constant number := null;
+  c_expir_opn_wfa_id                     constant number := null;
+  c_expir_hold_wfa_id                    constant number := null;
+  c_close_out_opn_wfa_id                 constant number := null;
+  c_nov_step_out_wfa_id                  constant number := null;
+  c_mdf_wfa_id                           constant number := null;
+  c_book_text_de                         constant text   := 'Der Kunde {1} eine {4} {2}/{3} Option mit Strike {5} {6} = {7} {8}';
+  c_book_text_en                         constant text   := 'The customer {1} a {4} {2}/{3} option with strike {5} {6} = {7} {8}';
+  c_adv_text_de                          constant text   := c_book_text_de;
+  c_adv_text_en                          constant text   := c_book_text_en;
+  c_buy_de                               constant text   := 'kauft';
+  c_buy_en                               constant text   := 'buys';
+  c_sell_de                              constant text   := 'verkauft';
+  c_sell_en                              constant text   := 'sells';
+
+
+  --+------------------------------------------------------------------------+
+  -- Fills in an order accoring to an existing position
+  --
+  -- @param i_doc          index of doc to fill in
+  -- @param i_pos_id       the position the order is filled in from
+  --+------------------------------------------------------------------------+
+  final protected procedure oofx#fill(
+    doc_id                                        id mem_doc_oofx
+   ,i_pos_id                                      id obj_pos
+  )
+  is
+    l_payoff_type_id                              id table code_otc_payoff_type;
+    l_settle_type_id                              id table code_otc_settle_type;
+  begin
+    with mem_doc_oofx(doc_id) as doc do
+
+      if not otc_base_lib.cont_is_in(obj_pos(i_pos_id).cont_id) then
+        doc.cont_id := obj_pos(i_pos_id).cont_id;
+      else
+        doc.nostro_cont_id := obj_pos(i_pos_id).cont_id;
+      end if;
+      with obj_pos(i_pos_id).asset as asset do
+        with asset.compo_conv(1) as compo do
+          if compo.opt_type = code_opt_type.call then
+            doc.put_curry_id  := asset.perf_curry_id;
+            doc.call_curry_id := compo.undrly_id;
+          else
+            doc.call_curry_id := asset.perf_curry_id;
+            doc.put_curry_id  := compo.undrly_id;
+          end if;
+          doc.expiry_date := compo.end_date;
+
+          doc_oofx_mtd#.map_from_conv_type_id(l_payoff_type_id, l_settle_type_id, compo.conv_type_id);
+          doc.opt_style_id   := compo.opt_style_id;
+          doc.settle_type_id := l_settle_type_id;
+          doc.payoff_type_id := l_payoff_type_id;
+
+          if doc.is_digi = '+' then
+            session.raise_ui_err(code_ui_err.oofx_digi_no_inc_dec);
+          end if;
+
+          if compo.opt_type_id = code_opt_type.call then
+            doc.call_qty_a := '-';
+          else
+            doc.put_qty_a := '-';
+          end if;
+          doc.strike      := compo.pretty_strike;
+          doc.opt_type_id := compo.opt_type_id;
+          doc.strike_pict := doc_oofx_util.conv_strike_pict(
+            i_strike_pict   => compo.picture
+           ,i_call_curry_id => doc.call_curry_id
+           ,i_put_curry_id  => doc.put_curry_id
+           ,i_opt_type_id   => doc.opt_type_id
+          );
+        end with;
+        if doc.cut_off_loc_id is null or doc.cut_off_loc_id != obj_asset_oofx(asset).cut_off_loc_id then
+          doc.cut_off_loc_id := obj_asset_oofx(asset).cut_off_loc_id;
+        end if;
+        if doc.cut_off_time is null or doc.cut_off_time != obj_asset_oofx(asset).cut_off_time then
+          doc.cut_off_time := obj_asset_oofx(asset).cut_off_time;
+        end if;
+        if doc.dlv_date is null or doc.dlv_date != asset.close_date then
+          doc.dlv_date := asset.close_date;
+        end if;
+        if doc.settle_rate_src_id is null or doc.settle_rate_src_id != obj_asset_oofx(asset).settle_rate_src_id then
+          doc.settle_rate_src_id := obj_asset_oofx(asset).settle_rate_src_id;
+        end if;
+        if   doc.settle_curry_id is null
+          or doc.settle_curry_id != obj_asset_oofx(asset).settle_curry_id
+        then
+          doc.settle_curry_id := obj_asset_oofx(asset).settle_curry_id;
+        end if;
+        if doc.pos_curry_id != obj_pos(i_pos_id).ref_curry_id then
+          doc.pos_curry_id := obj_pos(i_pos_id).ref_curry_id;
+        end if;
+
+      end with;
+      session.ui_mgr.open_doc(doc.id);
+    end with;
+  end oofx#fill;
+
+
+  --+------------------------------------------------------------------------+
+  -- Creats an order which increases the existing position
+  --
+  -- @param i_pos_id       position to be increased
+  --+------------------------------------------------------------------------+
+  procedure oofx#inc(
+    i_pos_id                                      id obj_pos
+  )
+  is
+    l_open_wfa_id                                 id table wfc_action;
+  begin
+    require(c_inc_opn_buy_wfa_id is not null, 'Define c_inc_opn_buy_wfa_id in Script Package DOC_OOFX');
+    require(c_inc_opn_sell_wfa_id is not null, 'Define c_inc_opn_sell_wfa_id in Script Package DOC_OOFX');
+    if obj_pos(i_pos_id).sign < 0 and not otc_base_lib.cont_is_in(obj_pos(i_pos_id).cont_id) then -- short
+      l_open_wfa_id := c_inc_opn_sell_wfa_id;
+    else
+      l_open_wfa_id := c_inc_opn_buy_wfa_id;
+    end if;
+    with new mem_doc_oofx_base(l_open_wfa_id) as doc do
+      oofx#fill(doc, i_pos_id);
+    end with;
+  end oofx#inc;
+
+
+  --+------------------------------------------------------------------------+
+  -- Creats an order which decreases the existing position
+  --
+  -- @param i_pos_id       position to be decreased
+  --+------------------------------------------------------------------------+
+  procedure oofx#dec(
+    i_pos_id                                      id obj_pos
+  )
+  is
+    l_open_wfa_id                                 id table wfc_action;
+  begin
+    require(c_dec_opn_buy_wfa_id is not null, 'Define c_dec_opn_buy_wfa_id in Script Package DOC_OOFX');
+    require(c_dec_opn_sell_wfa_id is not null, 'Define c_dec_opn_sell_wfa_id in Script Package DOC_OOFX');
+    if obj_pos(i_pos_id).sign < 0 and not otc_base_lib.cont_is_in(obj_pos(i_pos_id).cont_id) then -- short
+      l_open_wfa_id := c_dec_opn_buy_wfa_id;
+    else
+      l_open_wfa_id := c_dec_opn_sell_wfa_id;
+    end if;
+    with new mem_doc_oofx_base(l_open_wfa_id) as doc do
+      oofx#fill(doc, i_pos_id);
+    end with;
+  end oofx#dec;
+
+
+  --+------------------------------------------------------------------------+
+  -- Proceeds the passed order by setting the original position and
+  -- selecting all the trades.
+  -- In case of no proceeding wfa, the order is opened in the GUI
+  --
+  -- @param i_doc              order to be processed
+  -- @param i_origin_pos_id    originating position to be set
+  -- @param i_prc_wfa_id       proceeding wfa
+  --+------------------------------------------------------------------------+
+  private procedure oofx#prc(
+    i_doc                                         id mem_doc_oofx
+   ,i_origin_pos_id                               id obj_pos
+   ,i_prc_wfa_id                                  id table wfc_action := null
+  )
+  is
+  begin
+    with mem_doc_oofx(i_doc) as doc do
+      doc.origin_pos_id := i_origin_pos_id;
+      for trade in doc.oo_trade_list loop
+        if trade.fld_prop('oo_trade_is_sel').is_edit = '+' then
+          trade.is_sel := '+';
+        end if;
+      end loop;
+      if doc.is_digi = '+' then
+        doc.form_id := c_oof_digi_form;
+      end if;
+      if i_prc_wfa_id is null then
+        session.ui_mgr.open_doc(doc.id);
+      else
+        doc.do_wfc_action(i_prc_wfa_id);
+      end if;
+    end with;
+  end oofx#prc;
+
+
+  --+------------------------------------------------------------------------+
+  -- For the passed position(s), it creates orders to exericse it. In case of
+  -- just one position, the order is opened.
+  -- Otherwise, the orders are send to hold
+  --
+  -- @param i_pos_ids          comma spearated position id list
+  --+------------------------------------------------------------------------+
+  procedure oofx#exe(
+    i_pos_ids                                     text
+  )
+  is
+    l_opn                                         boolean;
+    l_opn_wfa_id                                  id table wfc_action;
+    l_prc_wfa_id                                  id table wfc_action;
+    l_settle_type_id                              id table code_otc_settle_type := null;
+    l_payoff_type_id                              id table code_otc_payoff_type := null;
+    l_conv_type_id                                id table code_compo_af_list;
+  begin
+    l_opn := util.item_count(i_pos_ids, c_sep) = 1;
+    for i in 1 .. util.item_count(i_pos_ids, c_sep) loop
+      l_conv_type_id := obj_pos(util.item(i_pos_ids, i, c_sep)).asset.compo_conv.conv_type_id;
+      doc_oofx_mtd#.map_from_conv_type_id(l_payoff_type_id, l_settle_type_id, l_conv_type_id);
+      if l_settle_type_id = code_otc_settle_type.conv_phys_del then
+        require(c_exe_opn_phys_wfa_id is not null, 'Define c_exe_opn_phys_wfa_id in Script Package DOC_OOFX');
+        require(c_exe_hold_phys_wfa_id is not null, 'Define c_exe_hold_phys_wfa_id in Script Package DOC_OOFX');
+        l_opn_wfa_id := c_exe_opn_phys_wfa_id;
+        l_prc_wfa_id := c_exe_hold_phys_wfa_id;
+      else
+        require(c_exe_opn_cash_wfa_id is not null, 'Define c_exe_opn_cash_wfa_id in Script Package DOC_OOFX');
+        require(c_exe_hold_cash_wfa_id is not null, 'Define c_exe_hold_cash_wfa_id in Script Package DOC_OOFX');
+        l_opn_wfa_id := c_exe_opn_cash_wfa_id;
+        l_prc_wfa_id := c_exe_hold_cash_wfa_id;
+      end if;
+      with new mem_doc_oofx_base(l_opn_wfa_id) as doc do
+        oofx#prc(doc, util.item(i_pos_ids, i, c_sep), iff(not l_opn, l_prc_wfa_id));
+      end with;
+    end loop;
+  end oofx#exe;
+
+
+  --+------------------------------------------------------------------------+
+  -- For the passed position(s), it creates orders to exericse it. In case of
+  -- just one position, the order is opened.
+  -- Otherwise, the orders are send to hold
+  --
+  -- @param i_pos_ids          comma spearated position id list
+  --+------------------------------------------------------------------------+
+  procedure oofx#expir(
+    i_pos_ids                                     text
+  )
+  is
+    l_opn                                         boolean;
+  begin
+    require(c_expir_opn_wfa_id is not null, 'Define c_expir_opn_wfa_id in Script Package DOC_OOFX');
+    require(c_expir_hold_wfa_id is not null, 'Define c_expir_hold_wfa_id in Script Package DOC_OOFX');
+    l_opn := util.item_count(i_pos_ids, c_sep) = 1;
+    for i in 1 .. util.item_count(i_pos_ids, c_sep) loop
+      with new mem_doc_oofx_base(c_expir_opn_wfa_id) as doc do
+        oofx#prc(doc, util.item(i_pos_ids, i, c_sep), iff(not l_opn, c_expir_hold_wfa_id));
+      end with;
+    end loop;
+  end oofx#expir;
+
+
+  --+------------------------------------------------------------------------+
+  -- For the passed position, it creates a close_out order and opens this
+  -- order.
+  --
+  -- @param i_pos_id          position where the close out is performed on
+  --+------------------------------------------------------------------------+
+  procedure oofx#close_out(
+    i_pos_id                                      id obj_pos
+  )
+  is
+  begin
+    require(c_close_out_opn_wfa_id is not null, 'Define c_close_out_opn_wfa_id in Script Package DOC_OOFX');
+    with new mem_doc_oofx(c_close_out_opn_wfa_id) as doc do
+      doc.origin_pos_id := i_pos_id;
+      for trade in doc.oo_trade_list loop
+        if trade.fld_prop('oo_trade_is_sel').is_edit = '+' then
+          trade.is_sel := '+';
+        end if;
+      end loop;
+      if doc.is_digi = '+' then
+        doc.form_id := c_oof_digi_form;
+      end if;
+      session.ui_mgr.open_doc(doc.id);
+    end with;
+  end oofx#close_out;
+
+
+  --+------------------------------------------------------------------------+
+  procedure oofx#step_out(
+    i_pos_id                                      id obj_pos
+  )
+  is
+  begin
+    with new mem_doc_oofx(c_nov_step_out_wfa_id) as doc do
+      doc.origin_pos_id := i_pos_id;
+      if doc.is_digi = '+' then
+        doc.form_id := c_oof_digi_form;
+      end if;
+      session.ui_mgr.open_doc(doc.id);
+    end with;
+  end oofx#step_out;
+
+
+  --+------------------------------------------------------------------------+
+  procedure oofx#mdf(
+    i_pos_id                                      id obj_pos
+  )
+  is
+  begin
+    with new mem_doc_oofx(c_mdf_wfa_id) as doc do
+      doc.origin_pos_id := i_pos_id;
+
+      -- Fills details when originating order is from expiry/exercise --
+      if not otc_base_lib.cont_is_in(obj_pos(i_pos_id).cont_id) then
+        doc_mgr#.doc#set_fld_edit(doc, doc_oofx#.c_cont_id, true);
+        doc.cont_id := obj_pos(i_pos_id).cont_id;
+        doc_mgr#.doc#set_fld_edit(doc, doc_oofx#.c_cont_id, false);
+      else
+        doc_mgr#.doc#set_fld_edit(doc, doc_oofx#.c_nostro_cont_id, true);
+        doc.nostro_cont_id := obj_pos(i_pos_id).cont_id;
+        doc_mgr#.doc#set_fld_edit(doc, doc_oofx#.c_cont_id, false);
+      end if;
+      doc_mgr#.doc#set_fld_edit(doc, doc_oofx#.c_pos_id, true);
+      doc.pos_id := i_pos_id;
+
+      if doc.is_digi = '+' then
+        doc.form_id := c_oof_digi_form;
+      end if;
+      session.ui_mgr.open_doc(doc.id);
+      doc_mgr#.doc#set_fld_edit(doc, doc_mgr#.c_order_type_id, false);
+      doc_mgr#.doc#set_fld_edit(doc, doc_mgr#.c_trx_date, false);
+      doc_mgr#.doc#set_fld_edit(doc, doc_mgr#.c_val_date, false);
+      doc_mgr#.doc#set_fld_edit(doc, doc_mgr#.c_perf_date, false);
+    end with;
+  end oofx#mdf;
+
+
+  --+------------------------------------------------------------------------+
+  -- For the passed oders, it creates a counter trade.
+  --
+  -- @param i_doc_ids          comma spearated doc id list
+  --+------------------------------------------------------------------------+
+  procedure oofx#gen_ct(
+    i_doc_ids                                     text
+  )
+  is
+    l_doc_id                                      id doc_oofx;
+    l_sgn                                         number;
+    l_slave                                       id mem_doc_work_item;
+    l_expiry_date                                 date;
+    l_opt_style_id                                id table code_opt_style;
+    l_settle_type_id                              id table code_otc_settle_type;
+    l_settle_rate_src_id                          id table code_settle_rate_src;
+    l_opp_ot_id                                   id table code_order_type;
+  begin
+    require(c_ct_opn_buy_wfa_id is not null, 'Define c_ct_opn_buy_wfa_id in Script Package DOC_OOFX');
+    require(c_ct_opn_sell_wfa_id is not null, 'Define c_ct_opn_sell_wfa_id in Script Package DOC_OOFX');
+
+    session.reset;
+    l_doc_id := util.item(i_doc_ids, 1, c_sep);
+    if l_doc_id is null then
+      return;
+    end if;
+    if util.item_count(i_doc_ids, c_sep) > 1 then
+      for i in 2 .. util.item_count(i_doc_ids, c_sep) loop
+        if not doc_oofx_util.same_spec_asset(l_doc_id, util.item(i_doc_ids, i, c_sep)) then
+          session.raise_ui_err(code_ui_err.oofx_eql_doc, l_doc_id || ';' || util.item(i_doc_ids, i, c_sep));
+        end if;
+      end loop;
+    end if;
+
+    -- since a few values are not available in the doc-DDIC and the asset
+    -- is not yet specialized, we have to load the order and get the values
+    -- and then reset the session, so that the work-item framework does not crash
+    -- when loading this order.
+    with mem_doc_oofx(nvl(session.doc_mgr.doc_id(l_doc_id), session.doc_mgr.load_doc(l_doc_id, session.doc_mgr.c_lock_mode_none))) as doc do
+      l_expiry_date        := doc.expiry_date;
+      l_opt_style_id       := doc.opt_style_id;
+      l_settle_type_id     := doc.settle_type_id;
+      l_settle_rate_src_id := doc.settle_rate_src_id;
+    end with;
+    session.reset;
+
+    l_opp_ot_id := order_type#.ot#opp_ot_id(doc_oofx(l_doc_id).order_type);
+
+    l_sgn := doc_oofx(l_doc_id).order_type.sgn_1;
+    with new mem_doc_oofx(iff(l_sgn > 0, c_ct_opn_sell_wfa_id, c_ct_opn_buy_wfa_id)) as ct_doc do
+      with doc_oofx(l_doc_id) as doc do
+        -- this will replace the init() wfc
+        if l_opp_ot_id is not null then
+          ct_doc.order_type_id := l_opp_ot_id;
+        end if;
+        ct_doc.call_curry_id := doc.call_curry_id;
+        ct_doc.put_curry_id  := doc.put_curry_id;
+        if doc.strike_pict_a != '+' then
+          ct_doc.strike_pict_a := '-';
+        end if;
+        ct_doc.strike      := doc.strike;
+        ct_doc.expiry_date := l_expiry_date;
+        if ct_doc.dlv_date != doc.dlv_date then
+          ct_doc.dlv_date := doc.dlv_date;
+        end if;
+        ct_doc.trx_date         := doc.trx_date;
+        ct_doc.val_date         := doc.val_date;
+        ct_doc.date_calc_mtd_id := doc.date_calc_mtd_id;
+        if doc_mgr#.doc#is_fld_edit(ct_doc, doc_oofx#.c_period_id) then
+          ct_doc.period_id := doc.period_id;
+        end if;
+        ct_doc.opt_style_id       := l_opt_style_id;
+        ct_doc.settle_type_id     := l_settle_type_id;
+        ct_doc.settle_rate_src_id := l_settle_rate_src_id;
+        if doc.pos_curry_a != '+' then
+          ct_doc.pos_curry_id := doc.pos_curry_id;
+        end if;
+        if doc.cut_off_loc_a != '+' then
+          ct_doc.cut_off_loc_id := doc.cut_off_loc_id;
+        end if;
+        if doc.cut_off_time_a != '+' then
+          ct_doc.cut_off_time := doc.cut_off_time;
+        end if;
+
+        -- remove barriers from generic asset
+        for barr in ct_doc.compo_conv.barr_list loop
+          ct_doc.compo_conv.barr_list.remv_item(barr);
+        end loop;
+
+        -- copy barrier information from customer trades
+        for i in 1 .. util.item_count(i_doc_ids, c_sep) loop
+          l_slave := doc_oofx_util.add_slave(ct_doc, util.item(i_doc_ids, i, c_sep));
+          with mem_doc_oofx(session.doc_mgr.doc_id(util.item(i_doc_ids, i, c_sep))) as clt_doc do
+
+            with clt_doc.compo_conv as conv do
+              if conv.barr_list.count > 0 then
+                with ct_doc.compo_conv as ct_conv do
+                  for barr in conv.barr_list loop
+                    with new ct_conv.barr_list as ct_barr do
+                      ct_barr.start_date   := barr.start_date;
+                      ct_barr.end_date     := barr.end_date;
+                      ct_barr.barr_type_id := barr.barr_type_id;
+                      ct_barr.lvl          := barr.lvl;
+                      ct_barr.lvl_perc     := barr.lvl_perc;
+                      ct_barr.trg_hit_cnt  := barr.trg_hit_cnt;
+                    end with;
+                  end loop;
+                end with;
+              end if;
+            end with;
+          end with;
+
+        end loop;
+
+      end with;
+
+      session.ui_mgr.open_doc(ct_doc);
+    end with;
+  end oofx#gen_ct;
+
+
+  --+------------------------------------------------------------------------+
+  -- Calculates the name of the fxopt asset
+  --
+  -- @param i_oa           id of the asset to calculate the name for
+  -- @return the name of the fxopt asset
+  --+------------------------------------------------------------------------+
+  private function legacy_name(
+    i_oa                                          id obj_asset
+  ) return text
+  is
+  begin
+    with obj_asset(i_oa) as oa do
+      return oa.generic_asset.name || ' ' || oa.compo_conv_fxopt.strike || ' on ' || to_char(oa.compo_conv_fxopt.end_date, 'DD.MM.YYYY');
+    end with;
+  end legacy_name;
+
+
+  --+------------------------------------------------------------------------+
+  -- Calculates the name of the oofx asset
+  --
+  -- @param i_oa           id of the asset to calculate the name for
+  -- @return the name of the oofx asset
+  --+------------------------------------------------------------------------+
+  private function oofx_name(
+    i_oa                                          id obj_asset
+  ) return text
+  is
+    l_text                                        text;
+  begin
+    with obj_asset(i_oa) as oa do
+      with oa.compo_conv(1) as conv do
+        if conv.strike_curry.is_vmetal = '+' or conv.undrly.is_vmetal = '+' then
+          l_text := 'PM ';
+        else
+          l_text := 'FX ';
+        end if;
+        if conv.conv_type_id in (code_compo_af_list.conv_asset_or_nothing, code_compo_af_list.conv_asset_or_nothing_cash) then
+          l_text := l_text || '(Asset-or-Nothing) ';
+        elsif conv.conv_type_id = code_compo_af_list.conv_cash_or_nothing then
+          l_text := l_text || '(Cash-or-Nothing) ';
+        end if;
+        l_text := l_text || conv.opt_type.name || ' - ';
+        l_text := l_text || conv.undrly.name || '/' || conv.strike_curry.name;
+        l_text := l_text || ' ' || conv.pretty_strike;
+        for barr in conv.barr_list loop
+          if barr.barr_type_id in (code_asset_barr_type.down_in, code_asset_barr_type.up_in) then
+            l_text := l_text || ' KI: ';
+          elsif barr.barr_type_id in (code_asset_barr_type.down_out, code_asset_barr_type.up_out) then
+            l_text := l_text || ' KO: ';
+          end if;
+          l_text := l_text || barr.lvl;
+        end loop;
+        l_text := l_text || ' on ' || session.date_short(conv.end_date);
+        return l_text;
+      end with;
+    end with;
+  end oofx_name;
+
+
+  --+------------------------------------------------------------------------+
+  -- Calculates the name of the asset
+  --
+  -- @param i_oa           id of the asset to calculate the name for
+  -- @return the name of the asset
+  --+------------------------------------------------------------------------+
+  function name(
+    i_oa                                          id obj_asset
+  ) return text
+  is
+  begin
+    if   obj_asset(i_oa).asset_struct_id is null
+      or obj_asset(i_oa).asset_struct_id not in (code_asset_struct.std_oofx_id
+                                                ,code_asset_struct.std_oofx_vmetal_id)
+    then
+      return legacy_name(i_oa);
+    else
+      return oofx_name(i_oa);
+    end if;
+  end name;
+
+
+  --+------------------------------------------------------------------------+
+  -- Calculates the values for the passed text
+  --
+  -- @param i_doc          index of doc to calculate the book_text
+  -- @param i_option_info  the text where the placeholders have to be replaced
+  -- @return text with the details replaced
+  --+------------------------------------------------------------------------+
+  private function book_text(
+    i_doc                                         mem_doc_oofx
+   ,i_option_info                                 text
+  ) return text
+  is
+    l_option_info                                 text := i_option_info;
+    l_compo                                       id mem_compo_conv;
+  begin
+    l_compo := i_doc.compo_conv;
+    if l_compo is null then
+      -- It does not make sense to do anything
+      return '';
+    end if;
+
+    -- The rest is coming from the conv compo
+    with mem_compo_conv(l_compo) as compo do
+      -- Curry 1
+      if compo.undrly_id is not null then
+        l_option_info := replace(l_option_info, '{2}', compo.undrly.extn.asset_iso);
+      else
+        l_option_info := replace(l_option_info, '{2}', '?');
+      end if;
+      -- Curry 2
+      if compo.strike_curry_id is not null then
+        l_option_info := replace(l_option_info, '{3}', compo.strike_curry.extn.asset_iso);
+      else
+        l_option_info := replace(l_option_info, '{3}', '?');
+      end if;
+
+      -- Call/Put
+      l_option_info := replace(l_option_info, '{4}', compo.opt_type.name);
+
+      -- Picture
+      l_option_info := replace(l_option_info, '{5}', abs(compo.picture));
+
+      -- Strike
+      if compo.pretty_strike is not null then
+        l_option_info := replace(l_option_info, '{7}', compo.pretty_strike);
+      else
+        l_option_info := replace(l_option_info, '{7}', '?');
+      end if;
+
+      -- Strike Currencies
+      if compo.picture > 0 then
+        l_option_info := replace(l_option_info, '{6}', compo.undrly.extn.asset_iso);
+        l_option_info := replace(l_option_info, '{8}', compo.strike_curry.extn.asset_iso);
+      else
+        l_option_info := replace(l_option_info, '{8}', compo.undrly.extn.asset_iso);
+        l_option_info := replace(l_option_info, '{6}', compo.strike_curry.extn.asset_iso);
+      end if;
+    end with;
+    return l_option_info;
+  end book_text;
+
+
+  --+------------------------------------------------------------------------+
+  -- Returns the english book text
+  --
+  -- @param i_doc          index of doc to calculate the book_text
+  -- @return the english book_text
+  --+------------------------------------------------------------------------+
+  function book_text_en(
+    i_doc                                         id mem_doc_oofx
+  ) return text
+  is
+    l_option_info                                 text := c_book_text_en;
+  begin
+    -- Buy/Sell
+    if mem_doc_oofx(i_doc).order_type.sgn_1 > 0 then
+      l_option_info := replace(l_option_info, '{1}', c_buy_en);
+    else
+      l_option_info := replace(l_option_info, '{1}', c_sell_en);
+    end if;
+    return book_text(
+      i_doc         => i_doc
+     ,i_option_info => l_option_info
+    );
+  end book_text_en;
+
+
+  --+------------------------------------------------------------------------+
+  -- Returns the german book text
+  --
+  -- @param i_doc          index of doc to calculate the book_text
+  -- @return the german book_text
+  --+------------------------------------------------------------------------+
+  function book_text_de(
+    i_doc                                         id mem_doc_oofx
+  ) return text
+  is
+    l_option_info                                 text := c_book_text_de;
+  begin
+    -- Buy/Sell
+    if mem_doc_oofx(i_doc).order_type.sgn_1 > 0 then
+      l_option_info := replace(l_option_info, '{1}', c_buy_de);
+    else
+      l_option_info := replace(l_option_info, '{1}', c_sell_de);
+    end if;
+    return book_text(
+      i_doc         => i_doc
+     ,i_option_info => l_option_info
+    );
+  end book_text_de;
+
+
+  --+------------------------------------------------------------------------+
+  -- Returns the english advice text
+  --
+  -- @param i_doc          index of doc to calculate the adv_text
+  -- @return the english adv_text
+  --+------------------------------------------------------------------------+
+  function adv_text_en(
+    i_doc                                         id mem_doc_oofx
+  ) return text
+  is
+    l_option_info                                 text := c_adv_text_en;
+  begin
+    -- Buy/Sell
+    if mem_doc_oofx(i_doc).order_type.sgn_1 > 0 then
+      l_option_info := replace(l_option_info, '{1}', c_buy_en);
+    else
+      l_option_info := replace(l_option_info, '{1}', c_sell_en);
+    end if;
+    return book_text(
+      i_doc         => i_doc
+     ,i_option_info => l_option_info
+    );
+  end adv_text_en;
+
+
+  --+------------------------------------------------------------------------+
+  -- Returns the german advice text
+  --
+  -- @param i_doc          index of doc to calculate the adv_text
+  -- @return the german adv_text
+  --+------------------------------------------------------------------------+
+  function adv_text_de(
+    i_doc                                         id mem_doc_oofx
+  ) return text
+  is
+    l_option_info                                 text := c_adv_text_de;
+  begin
+    -- Buy/Sell
+    if mem_doc_oofx(i_doc).order_type.sgn_1 > 0 then
+      l_option_info := replace(l_option_info, '{1}', c_buy_de);
+    else
+      l_option_info := replace(l_option_info, '{1}', c_sell_de);
+    end if;
+    return book_text(
+      i_doc         => i_doc
+     ,i_option_info => l_option_info
+    );
+  end adv_text_de;
+
+end doc_oofx;

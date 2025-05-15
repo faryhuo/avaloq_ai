@@ -1,0 +1,326 @@
+[Script 1.0]
+
+public extendable script package fix_doc_new_single_in_css
+----------------------------------------------------------------------------
+-- DESCRIPTION
+-- Customer site specific script package to override completion of
+-- client order resulting from Doc New Single In message
+----------------------------------------------------------------------------
+is
+
+  ----------------------------------------------------------------------------
+  -- IMPORTS
+  ----------------------------------------------------------------------------
+  ---- COMMON ----
+  import           err;
+
+  ---- INTERFACE ----
+  import           fix;
+
+
+  ----------------------------------------------------------------------------
+  -- FUNCTIONS
+  ----------------------------------------------------------------------------
+  --+------------------------------------------------------------------------+
+  -- Returns true if client order can be manually corrected and is not
+  -- directly rejected to the Buy-Side (e.g. asset was incorrect)
+  --
+  -- @param  i_m       Incoming message to extract values from
+  -- @param  i_clt_idx Memory slot of market or client order
+  -- @return           True to manually correct client order
+  --+------------------------------------------------------------------------+
+  function do_cor_clt_doc_manual(
+    i_m                                           mem_msg_fix_doc_new_single
+   ,i_clt_idx                                     id mem_doc_stex
+  ) return boolean
+  is
+  begin
+
+    return false;
+
+  exception
+    when others then
+      err.raise_fa('fix_doc_new_single_in_css.do_cor_clt_doc_manual');
+  end do_cor_clt_doc_manual;
+
+
+  --+------------------------------------------------------------------------+
+  -- Returns true if default completion of client order is overridden
+  --
+  -- @param  i_m Incoming message to extract values from
+  -- @return     True to override completion of client order
+  --+------------------------------------------------------------------------+
+  function do_ovr_compl_clt(
+    i_m                                           mem_msg_fix_doc_new_single
+  ) return boolean
+  is
+  begin
+
+    return false;
+
+  exception
+    when others then
+      err.raise_fa('fix_doc_new_single_in_css.do_ovr_compl_clt');
+  end do_ovr_compl_clt;
+
+
+  ---------------------------------------------------------------------------
+  -- Returns true if default preparation of client order is overridden
+  ---------------------------------------------------------------------------
+  function do_ovr_prep_clt(
+    i_m                                           mem_msg_fix_exe_rep
+  ) return boolean
+  is
+  begin
+
+    return false;
+
+  exception
+    when others then
+      err.raise_fa('fix_doc_new_single_in_css.do_ovr_prep_clt');
+  end do_ovr_prep_clt;
+
+
+  ---------------------------------------------------------------------------
+  -- Returns true if execution report 'new' should be sent automatically to
+  -- the Buy-Side after processing of incoming message.
+  --
+  -- @param  i_m       Incoming message to extract values from
+  -- @param  i_clt_idx Memory slot of market or client order
+  -- @return           True to send back execution report 'new'
+  ---------------------------------------------------------------------------
+  function do_send_exe_rep_new(
+    i_m                                           mem_msg_fix_doc_new_single
+   ,i_clt_idx                                     id mem_doc_stex
+  ) return boolean
+  is
+  begin
+
+    return true;
+
+  exception
+    when others then
+      err.raise_fa('fix_doc_new_single_in_css.do_send_exe_rep_new');
+  end do_send_exe_rep_new;
+
+
+  ---------------------------------------------------------------------------
+  -- Returns true if execution report 'pend_new' should be sent automatically to
+  -- the Buy-Side after processing of incoming message.
+  --
+  -- @param  i_m       Incoming message to extract values from
+  -- @param  i_clt_idx Memory slot of market or client order
+  -- @return           True to send back execution report 'pend_new'
+  ---------------------------------------------------------------------------
+  function do_send_exe_rep_pend_new(
+    i_m                                           mem_msg_fix_exe_rep
+   ,i_clt_idx                                     id mem_doc_stex
+  ) return boolean
+  is
+  begin
+
+    return fix.c_do_send_exe_rep_pend_new;  --TODO intended to be set to obsolete in C 3908153 on MAIN 5.5 but current policy is there should be no derelease
+
+  exception
+    when others then
+      err.raise_fa('fix_doc_new_single_in_css.do_send_exe_rep_pend_new');
+  end do_send_exe_rep_pend_new;
+
+
+  ----------------------------------------------------------------------------
+  -- PROCEDURES
+  ----------------------------------------------------------------------------
+  --+------------------------------------------------------------------------+
+  -- Override default completion of client order
+  -- Please note that calculation of fields is disabled for performance
+  -- reason. The calculation is enabled and done after this procedure.
+  --
+  -- @param i_m       Incoming message to extract values from
+  -- @param i_clt_idx Memory slot of market or client order
+  --+------------------------------------------------------------------------+
+  procedure ovr_compl_clt(
+    i_m                                           mem_msg_fix_doc_new_single
+   ,i_clt_idx                                     id mem_doc_stex
+  )
+  is
+  begin
+
+    if i_m is null or i_clt_idx is null then
+      require(false, 'i_m is not null and i_clt_idx is not null');
+    end if;
+
+    -- @Format-Off
+    --    ---- COMPLETE CLIENT ORDER ----
+    --    with mem_doc_stex(i_clt_idx) as stex do
+    --
+    --      stex.... := ...;
+    --
+    --    end with;
+    -- @Format-On
+
+  exception
+    when others then
+      err.raise_fa(
+        'fix_doc_new_single_in_css.ovr_compl_clt'
+       ,'reason' ,session.log_mgr.last_log_msg
+       ,'msg_id' ,i_m.head.msg_id
+      );
+  end ovr_compl_clt;
+
+
+  ---------------------------------------------------------------------------
+  -- Override parameters used to generate market order from new doc single
+  --
+  -- Order attributes are provided in a dedicated memory table
+  --  - Order type
+  --  - Asset
+  --  - Business partner
+  --  - Container
+  --  - Trading place
+  --
+  -- For both the asset and the container a flag is provided that indicates
+  -- if the respective order attribute is erroneous. This allows to detect
+  -- and correct such a case before order creation if possible.
+  ---------------------------------------------------------------------------
+  procedure ovr_prep_clt(
+    i_m                                           mem_msg_fix_doc_new_single
+   ,i_mem_tab                                     mem_tab
+  )
+  is
+    -- Flag indicating order attribute error
+    l_has_err_asset                               boolean                      := false;
+    l_has_err_cont                                boolean                      := false;
+    l_has_err_exec_type                           boolean                      := false;
+    l_has_err_macc                                boolean                      := false;
+
+    -- Identifier of asset, business partner, container, marketplace
+    l_asset_id                                    id obj_asset;
+    l_bp_id                                       id obj_bp;
+    l_cont_id                                     id obj_cont;
+    l_mkt_id                                      id obj_mkt;
+    l_trd_curry_id                                id obj_asset;
+    l_exec_type_id                                id table code_order_sub_type;
+    l_macc_id                                     id obj_pos;
+
+    -- Order type
+    l_clt_ot_id                                   number;
+  begin
+
+    if i_m is null or i_mem_tab is null then
+      require(false, 'i_m is not null and i_mem_tab is not null');
+    end if;
+
+    ---- RETRIEVE ORDER ATTRIBUTES FROM MEMORY TABLE ----
+    with i_mem_tab.row_list(1) as row do
+
+      -- Error flags
+      l_has_err_asset     := nvl(row.fld(fix.c_col_name_asset_err).bool_val, '+') = '+';
+      l_has_err_cont      := nvl(row.fld(fix.c_col_name_cont_err).bool_val, '+') = '+';
+      l_has_err_exec_type := nvl(row.fld(fix.c_col_name_exec_type_err).bool_val, '+') = '+';
+      l_has_err_macc      := nvl(row.fld(fix.c_col_name_macc_err).bool_val, '+') = '+';
+
+      -- Object identifier of asset, business partner, ...
+      l_asset_id     := row.fld(fix.c_col_name_asset_id).id_val;
+      l_bp_id        := row.fld(fix.c_col_name_bp_id).id_val;
+      l_cont_id      := row.fld(fix.c_col_name_cont_id).id_val;
+      l_mkt_id       := row.fld(fix.c_col_name_mkt_id).id_val;
+      l_trd_curry_id := row.fld(fix.c_col_name_trd_curry_id).id_val;
+      l_exec_type_id := row.fld(fix.c_col_name_exec_type_id).id_val;
+      l_macc_id      := row.fld(fix.c_col_name_macc_id).id_val;
+
+      -- Order type
+      l_clt_ot_id := row.fld(fix.c_col_name_clt_ot_id).number_val;
+
+    end with;
+
+    ---------------------------------------------------------------------------
+    ---- OVERRIDE ORDER ATTRIBUTES IF REQUIRED ----
+    -- The commented code may be used as starting point for the customer
+    -- specific implementation.
+    -- The referenced customer specific order attribute functions such as
+    -- asset_id() can be added to this script package.
+    -- Both retrieving of order attributes from the memory table and update
+    -- of the memory table should be left unchanged.
+    ---- ASSET ----
+    --    if l_has_err_asset then
+    --      l_asset_id := asset_id(i_m);
+    --
+    --      if l_asset_id != fix.c_dflt_asset_id then
+    --        l_has_err_asset := false;
+    --      end if;
+    --    end if;
+    --
+    --    ---- BUSINESS PARTNER ----
+    --    if <your_cond> then
+    --      l_bp_id := bp_id(
+    --        i_m      => i_m
+    --       ,i_mkt_id => l_mkt_id
+    --      );
+    --    end if;
+    --
+    --    ---- CONTAINER ----
+    --    if l_has_err_cont then
+    --      l_cont_id := cont_id(i_m);
+    --
+    --      if l_cont_id != fix.c_dflt_cont_id then
+    --        l_has_err_cont := false;
+    --      end if;
+    --    end if;
+    --
+    --    ---- TRADING PLACE ----
+    --    if <your_cond> then
+    --      l_mkt_id := mkt_id(i_m);
+    --    end if;
+    --
+    --    ---- TRADING CURRENCY ----
+    --    if <your_cond> then
+    --      l_trd_curry_id := trd_curry_id(i_m);
+    --    end if;
+    --
+    --    ---- ORDER TYPE ----
+    --    -- Please note the order type group must still be the same.
+    --    -- Only in specific cases an update of the order type is indicated.
+    --    if <your_cond> then
+    --      l_clt_ot_id := cnt_ot_id(i_m);
+    --    end if;
+    --
+    --    ---- MONEY ACCOUNT  ----
+    --    if <your_cond> then
+    --      l_macc_id := macc_id(i_m);
+    --    end if;
+    ---- UPDATE ORDER ATTRIBUTES OF MEMORY TABLE ----
+    with i_mem_tab.row_list(1) as row do
+
+      -- Error flags
+      row.fld(fix.c_col_name_asset_err).bool_val     := iff(l_has_err_asset, '+', '-');
+      row.fld(fix.c_col_name_cont_err).bool_val      := iff(l_has_err_cont, '+', '-');
+      row.fld(fix.c_col_name_exec_type_err).bool_val := iff(l_has_err_exec_type, '+', '-');
+      row.fld(fix.c_col_name_macc_err).bool_val      := iff(l_has_err_macc, '+', '-');
+
+      -- Object identifier of asset, business partner, ...
+      row.fld(fix.c_col_name_asset_id).id_val     := l_asset_id;
+      row.fld(fix.c_col_name_bp_id).id_val        := l_bp_id;
+      row.fld(fix.c_col_name_cont_id).id_val      := l_cont_id;
+      row.fld(fix.c_col_name_mkt_id).id_val       := l_mkt_id;
+      row.fld(fix.c_col_name_trd_curry_id).id_val := l_trd_curry_id;
+      row.fld(fix.c_col_name_exec_type_id).id_val := l_exec_type_id;
+      row.fld(fix.c_col_name_macc_id).id_val      := l_macc_id;
+
+      -- Order type
+      row.fld(fix.c_col_name_clt_ot_id).number_val := l_clt_ot_id;
+      if l_clt_ot_id is null then
+        assert(false, 'l_clt_ot_id is not null');
+      end if;
+
+    end with;
+
+  exception
+    when others then
+      err.raise_fa(
+        'fix_doc_new_single_in_css.ovr_prep_clt'
+       ,'reason' ,session.log_mgr.last_log_msg
+       ,'msg_id' ,i_m.head.msg_id
+      );
+  end ovr_prep_clt;
+
+end fix_doc_new_single_in_css;

@@ -1,0 +1,31 @@
+[Script 1.0]
+
+script package MDB$PROD_CTLG_HELPER
+is
+
+
+  class_sellable_yes                     constant number := btt.prod.obj_extn.prod_sellable.class.prod_sellable_yes_id;
+  class_active_yes                       constant number := btt.prod.obj_extn.prod_active.class.prod_active_yes_id;
+  class_prod_3rdp_no                     constant number := btt.prod.obj_extn.prod_3rdp.class.prod_3rdp_no_id;
+
+
+  function is_sellable(
+    prod                                          obj_prod
+  ) return boolean
+  is
+    l_retvalue                                    boolean;
+  begin
+    l_retvalue := prod.class('prod_sellable') =  class_sellable_yes
+                  and prod.class('prod_active')   =  class_active_yes
+                  and prod.class('prod_3rdp')     =  class_prod_3rdp_no
+                  and (prod.valid_from            <= session.today        or  prod.valid_from             is null)
+                  and (session.today              <= prod.valid_to        or  prod.valid_to               is null);
+
+    return l_retvalue;
+
+  exception
+    when others then
+      session.raise_fa_err('is_sellable failed');
+  end is_sellable;
+
+end mdb$prod_ctlg_helper;

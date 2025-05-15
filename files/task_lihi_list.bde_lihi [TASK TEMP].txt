@@ -1,0 +1,17 @@
+[Task Template 1.0]
+
+task template task_lihi_list.bde_lihi
+
+  task                                  task_lihi_list (no_override)
+  single_login                          true
+  hide_other_parameters                 true
+  naming
+    dfltlang                            "BDE initial event generation LIHI - Script"
+
+  param i_layout_list (ro)
+    script:task_lihi_list.bde_lihi
+	
+  param i_hobs_filter_avm_res
+    delta
+
+end task template

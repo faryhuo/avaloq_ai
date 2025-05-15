@@ -1,0 +1,2519 @@
+[Script 1.0]
+
+script package fix_exe_rep_trade_in
+
+  ----------------------------------------------------------------------------
+  -- DESCRIPTION
+  -- Script package for processing of Execution Report Trade
+  --
+  -- Business Cases
+  -- - Solicited Order - Order Entry in Avaloq
+  --   - Full and Partial Execution of Order
+  --     Load related market order into memory with write lock
+  --     Create execution, execute against market order if first execution
+  --
+  --   - Aggregation of Execution Orders
+  --     Load related market order into memory with write lock
+  --     Create execution for first trade message, for consecutive trade
+  --     messages the execution is updated (total quantity, average price,
+  --     execution time), then executed against the market order.
+  --     Aggregation of execution orders can be enabled with base parameter
+  --     avq.intf.fix / aggr_exec_broker_list.
+  --
+  -- - Unsolicited Order/Trade - Order Entry in Trading System
+  --   - Full and Partial Execution of Order
+  --     Creation of client order upon reception of first trade slip
+  --     Execution is created for every trade slip, executed against client
+  --     order if first execution, else periodically by a dedicated job
+  --
+  -- Field Account or PartyID for role ClientID defines container of client
+  -- order. Default container is taken if Account and PartyID are undefined.
+  -- If no container is found for given key, add post-it to client order and
+  -- transition to status 'TP: Order Error'.
+  --
+  -- Raise exception in case content of message is not as expected.
+  ----------------------------------------------------------------------------
+
+is
+
+  ----------------------------------------------------------------------------
+  -- IMPORTS
+  ----------------------------------------------------------------------------
+  ---- COMMON ----
+  import        doc_stex;
+  import        err;
+  import        equal;
+
+  ---- INTERFACE ----
+  import        fix;
+  import        fix_asset;
+  import        fix_in;
+  import        fix_exe_rep_trade_in_css;
+
+
+  ----------------------------------------------------------------------------
+  -- FUNCTIONS
+  ----------------------------------------------------------------------------
+
+  ----------------------------------------------------------------------------
+  -- Counterparty details
+  -- Post-it text in case counterparty of trade could not be determined
+  ----------------------------------------------------------------------------
+  function cntprty_det(
+    i_m                      mem_msg_fix_exe_rep
+  ) return text
+  is
+
+    -- Post-it text
+    l_pit_text               text;
+
+    -- Local caches
+    l_onBehalfOfCompID       text;
+    l_senderCompID           text;
+
+  begin
+
+    if i_m is null then
+      require(false, 'i_m is not null');
+    end if;
+
+    with i_m.PartiesList as i_m_PartiesList do
+
+      ---- GET IDENTIFIER OF COUNTERPARTY OF TRADE ----
+      if i_m_PartiesList.NoPartyIDs is not null then
+        for pg in i_m_PartiesList.PartiesGroup loop
+          if pg.PartyRole = fix.c_party_role_exec_firm then
+            -- Identifier of executing firm, broker
+            l_pit_text := 'identifier ' || pg.PartyID || ' or ';
+            exit;
+          end if;
+        end loop;
+      end if;
+
+    end with;
+
+    with i_m.StandardMessageHeader as i_m_StandardMessageHeader do
+
+      l_onBehalfOfCompID := i_m_StandardMessageHeader.OnBehalfOfCompID;
+      l_senderCompID     := i_m_StandardMessageHeader.SenderCompID;
+
+      if l_onBehalfOfCompID is not null then
+        -- Identifier of executing firm if message delivered by a third party
+        l_pit_text := l_pit_text || l_onBehalfOfCompID;
+
+      elsif i_m_StandardMessageHeader.SenderCompID is not null then
+        -- Identifier of firm sending message
+        l_pit_text := l_pit_text || i_m_StandardMessageHeader.SenderCompID;
+      end if;
+
+    end with;
+
+    return l_pit_text;
+
+  exception
+    when others then
+      return null;
+  end cntprty_det;
+
+
+  ----------------------------------------------------------------------------
+  -- Returns true if trade resulting of Trade Confirmation or Reported Trade
+  -- Respective information is provided in the user defined fields GenFldList
+  --
+  -- Defined by SIX Swiss Exchange
+  -- TransactionType: Identifies an SWX specific transaction type
+  -- 0 = Order, 1 = Trade Confirmation, 2 = Bilateral Trade Reversal
+  -- 3 = Reported Trade, 4 = Unilateral Trade Reversal, 5 = Correction
+  ----------------------------------------------------------------------------
+  function is_off_book_trade(
+    i_m                      mem_msg_fix_exe_rep
+  ) return boolean
+  is
+    -- Debug flag
+    l_do_debug               boolean := fix.c_do_debug;
+  begin
+
+    if i_m is null then
+      require(false, 'i_m is not null');
+    end if;
+
+    with i_m.GenFldList as i_m_GenFldList do
+
+      if i_m_GenFldList.NoGenFlds is not null then
+        for fld in i_m_GenFldList.GenFldGroup loop
+          if    fld.GenFldTag in ('6524', 'TransactionType')
+            and fld.GenFldVal in ('1', '3')
+          then
+            if l_do_debug then
+              fix.debug('Trade Confirmation or Reported Trade');
+            end if;
+            return true;
+          end if;
+        end loop;
+      end if;
+
+    end with;
+
+    return false;
+
+  exception
+    when others then
+      return false;
+  end is_off_book_trade;
+
+
+  ----------------------------------------------------------------------------
+  -- Returns true if trade reversal
+  -- Respective information is provided in the user defined fields GenFldList
+  --
+  -- Defined by SIX Swiss Exchange
+  -- TransactionType: Identifies an SWX specific transaction type
+  -- 0 = Order, 1 = Trade Confirmation, 2 = Bilateral Trade Reversal
+  -- 3 = Reported Trade, 4 = Unilateral Trade Reversal, 5 = Correction
+  ----------------------------------------------------------------------------
+  function is_trade_revs(
+    i_m                      mem_msg_fix_exe_rep
+  ) return boolean
+  is
+    -- Debug flag
+    l_do_debug               boolean := fix.c_do_debug;
+
+  begin
+
+    if i_m is null then
+      require(false, 'i_m is not null');
+    end if;
+
+    with i_m.GenFldList as i_m_GenFldList do
+
+      if i_m_GenFldList.NoGenFlds is not null then
+        for fld in i_m_GenFldList.GenFldGroup loop
+          if    fld.GenFldTag in ('6524', 'TransactionType')
+            and fld.GenFldVal in ('2', '4')
+          then
+            if l_do_debug then
+              fix.debug('Bilateral or Unilateral Trade Reversal');
+            end if;
+            return true;
+          end if;
+        end loop;
+      end if;
+
+    end with;
+
+    return false;
+
+  exception
+    when others then
+      return false;
+  end is_trade_revs;
+
+
+  ----------------------------------------------------------------------------
+  -- Get identifier of original client order for a trade reversal
+  -- Respective information is provided in the user defined fields GenFldList
+  --
+  -- Defined by SIX Swiss Exchange
+  -- OrigTrdMatchID: Trade identifier of the original trade
+  -- This is indicated when either a trade reversal or a nostro correction
+  -- is transacted
+  ----------------------------------------------------------------------------
+  function orig_clt_doc_id(
+    i_m                      mem_msg_fix_exe_rep
+  ) return id doc_stex
+  is
+
+    -- Identifier of client order, execution
+    l_clt_doc_id             id doc_stex;
+    l_exec_doc_id            id doc_stex;
+
+    -- Order type of execution order
+    l_exec_ot_id             number;
+
+    -- External reference of execution order
+    l_extl_ref_nr            text;
+
+    -- Trade identifier of the original trade
+    l_orig_trade_match_id    text;
+
+  begin
+
+    if i_m is null then
+      require(false, 'i_m is not null');
+    end if;
+
+    with i_m.GenFldList as i_m_GenFldList do
+
+      if i_m_GenFldList.NoGenFlds is not null then
+        for fld in i_m_GenFldList.GenFldGroup loop
+          if fld.GenFldTag in ('6555', 'OrigTrdMatchID') then
+            l_orig_trade_match_id := fld.GenFldVal;
+            exit;
+          end if;
+        end loop;
+      end if;
+
+    end with;
+
+    if l_orig_trade_match_id is null then return null; end if;
+
+    l_extl_ref_nr := fix_in.extl_ref_nr(
+      i_comp_id   => i_m.StandardMessageHeader.SenderCompID
+     ,i_cl_ord_id => l_orig_trade_match_id
+    );
+
+    ---- ORDER TYPE ----
+    l_exec_ot_id := fix_in.cnt_order_type_id(
+      i_side       => i_m.Side
+     ,i_exec_type  => i_m.ExecType
+     ,i_pos_effect => i_m.PositionEffect
+    );
+    if l_exec_ot_id is null then
+      assert(false, 'l_exec_ot_id is not null');
+    end if;
+
+    ---- GET EXECUTION ORDER FOR GIVEN EXTERNAL REFERENCE ----
+    l_exec_doc_id := lookup.doc_id(
+      extl_ref_nr   => l_extl_ref_nr
+     ,meta_typ_id   => fix.c_meta_type_stex
+     ,order_type_id => l_exec_ot_id
+     ,val_date      => i_m.SettlDate
+    );
+
+    if l_exec_doc_id is null then
+      l_exec_doc_id := lookup.doc_id(
+        extl_ref_nr   => l_orig_trade_match_id
+       ,meta_typ_id   => fix.c_meta_type_stex
+       ,order_type_id => l_exec_ot_id
+       ,val_date      => i_m.SettlDate
+      );
+    end if;
+
+    if l_exec_doc_id is null then return null; end if;
+
+    ---- GET CLIENT ORDER FOR GIVEN EXECUTION ----
+    begin
+      with doc_stex(l_exec_doc_id) as stex do
+        l_clt_doc_id := stex.exec_mkt_doc_id;
+      end with;
+    end;
+
+    return l_clt_doc_id;
+
+  exception
+    when others then
+      return null;
+  end orig_clt_doc_id;
+
+
+  ----------------------------------------------------------------------------
+  -- Get original trade match identifier for a trade reversal
+  -- Respective information is provided in the user defined fields GenFldList
+  --
+  -- Defined by SIX Swiss Exchange
+  -- OrigTrdMatchID: Trade identifier of the original trade
+  -- This is indicated when either a trade reversal or a nostro correction
+  -- is transacted
+  ----------------------------------------------------------------------------
+  function orig_trade_match_id(
+    i_m                      mem_msg_fix_exe_rep
+  ) return text
+  is
+
+    -- Trade identifier of the original trade
+    l_orig_trade_match_id    text;
+
+  begin
+
+    if i_m is null then
+      require(false, 'i_m is not null');
+    end if;
+
+    with i_m.GenFldList as i_m_GenFldList do
+
+      if i_m_GenFldList.NoGenFlds is not null then
+        for fld in i_m_GenFldList.GenFldGroup loop
+          if fld.GenFldTag in ('6555', 'OrigTrdMatchID') then
+            l_orig_trade_match_id := fld.GenFldVal;
+            exit;
+          end if;
+        end loop;
+      end if;
+
+    end with;
+
+    return l_orig_trade_match_id;
+
+  exception
+    when others then
+      return null;
+  end orig_trade_match_id;
+
+
+  ----------------------------------------------------------------------------
+  -- Generate execution for given trade slip
+  -- Returns identifier of execution
+  ----------------------------------------------------------------------------
+  function gen_exec(
+    i_m                      mem_msg_fix_exe_rep
+   ,i_clt_doc_id             id doc_stex     := null
+   ,i_is_await_conf          boolean         := false
+   ,i_asset_id               id obj_asset    := null
+   ,i_clt_doc                id mem_doc_stex := null
+   ,i_aggr_key               text         := null
+  ) return id doc_stex
+  is
+
+    -- Flag indicating order attribute error
+    l_has_err_asset          boolean := false;
+    l_has_err_cont           boolean := false;
+    l_has_err_macc           boolean := false;
+
+    -- Flag indicating off-book trade
+    l_is_off_book_trade      boolean := false;
+
+    -- Execution time, transaction date
+    l_exec_time              date;
+    l_trx_date               date;
+
+    -- Identifier of post-it subtype
+    l_pit_subtype_id         id code_postit_sub_type;
+
+    -- Identifier of execution
+    l_exec_doc_id            id doc_stex;
+
+    -- Index of execution in memory
+    l_exec_idx               id mem_doc_stex;
+
+    -- Identifier of asset, business partner, container, marketplace
+    l_asset_id               id obj_asset;
+    l_mkt_trade_curry_id     id obj_asset;
+    l_trade_curry_id         id obj_asset;
+    l_bp_id                  id obj_bp;
+    l_cont_id                id obj_cont;
+    l_mkt_id                 id obj_mkt;
+    l_snd_mkt_id             id obj_mkt;
+
+    -- Order type of execution, fixed price, quantity
+    l_exec_ot_id             number;
+    l_price_fix              number;
+    l_qty                    number;
+    l_settl_curr_fx_rate     number;
+
+    -- Post-it text
+    l_pit_text_inv_asset     text;
+    l_pit_text_inv_cont      text;
+    l_pit_text_inv_curr      text;
+    l_pit_text_inv_macc      text;
+    l_pit_text_miss_macc     text;
+
+    -- External, internal reference of execution order, sending time
+    l_extl_ref_nr            text;
+    l_intl_ref_nr            text;
+    l_send_time              text;
+    l_cascade_ref_nr         text;
+
+    -- Local cache
+    l_new_asset_id           id obj_asset;
+    l_new_trade_curry_id     id obj_asset;
+    l_new_bp_id              id obj_bp;
+    l_new_cont_id            id obj_cont;
+    l_new_mkt_id             id obj_mkt;
+    l_new_exec_ot_id         number;
+    l_custOrderCapacity      text;
+    l_clientPrice            number;
+    l_today                  date := session.today;
+    l_instrumentSecurityID   text;
+
+    -- Debug flag
+    l_do_debug               boolean := fix.c_do_debug;
+
+  begin
+
+    if i_m is null then
+      require(false, 'i_m is not null');
+    end if;
+
+    if l_do_debug then
+      fix.set_debug_hdr('FIX_EXE_REP_TRADE_IN.GEN_EXEC');
+    end if;
+    --------------------------------------------------------------------------
+    -- PREPARE PARAMETERS TO GENERATE STEX EXECUTION
+    --------------------------------------------------------------------------
+
+    l_instrumentSecurityID := i_m.Instrument.SecurityID;
+
+    if i_clt_doc_id is not null then
+      -- Solicited context align execution order type with client order
+      l_exec_ot_id := doc_stex(i_clt_doc_id).order_type.order_type_cnt_id;
+    else
+      ---- ORDER TYPE ----
+      if is_trade_revs(i_m) then
+        l_exec_ot_id := fix_in.cnt_order_type_id(
+          i_side      => i_m.Side
+         ,i_exec_type => fix.c_exec_type_trade_canc
+        );
+      else
+        l_exec_ot_id := fix_in.cnt_order_type_id(
+          i_side       => i_m.Side
+         ,i_exec_type  => i_m.ExecType
+         ,i_pos_effect => i_m.PositionEffect
+        );
+      end if;
+    end if;
+    if l_exec_ot_id is null then
+      assert(false, 'l_exec_ot_id is not null');
+    end if;
+
+    ---- TRADING PLACE ----
+    l_mkt_id := fix_in.mkt_id(i_m);
+    if l_mkt_id is null then
+      if l_do_debug then
+        fix.debug('Unknown or not unique ISO Code ' || i_m.LastMkt);
+      end if;
+    end if;
+
+    ---- BUSINESS PARTNER ----
+    if   l_mkt_id is not null
+      or fix.c_bp_obj_key_id is not null
+    then
+      l_bp_id := fix_in.bp_id(
+        i_m      => i_m
+       ,i_mkt_id => l_mkt_id
+      );
+    end if;
+
+    ---- CONTAINER ----
+    if l_bp_id is null or obj_bp(l_bp_id).dflt_cont_id is null then
+      l_cont_id := fix_in.cont_id(i_m);
+
+      if l_cont_id is null then
+        -- Unknown container, take default container instead
+        l_cont_id := fix.c_dflt_cont_id;
+        l_pit_text_inv_cont := 'No business partner found for ' || cntprty_det(i_m);
+        l_has_err_cont := true;
+      end if;
+    end if;
+
+    ---- TRADING CURRENCY ----
+    l_trade_curry_id := lookup.asset_id(
+      key_val  => i_m.Currency
+     ,key_type => fix.c_key_asset_iso
+    );
+
+    ---- ASSET ----
+    if i_asset_id is null then
+      l_asset_id := fix_in.asset_id(
+        i_m              => i_m
+       ,i_trade_curry_id => l_trade_curry_id
+      );
+
+    else
+      l_asset_id := i_asset_id;
+
+    end if;
+
+    if l_asset_id is null then
+      -- Unknown asset, take default asset instead
+      l_asset_id := fix.c_dflt_asset_id;
+      l_pit_text_inv_asset := 'No asset found with key ' || l_instrumentSecurityID
+      l_has_err_asset := true;
+
+    else
+      -- Check for euro-in currency (incl. Euro) and correct after asset lookup with correct listing currency
+      -- Makes only sense if asset was found before; Euro must not be included
+      if    obj_curry(l_trade_curry_id).emu_curry = '+'
+        and i_m.Currency <> fix.c_key_curry_iso_eur
+      then
+        -- Store trade curry in market_trade_curry and set trade curry to EUR
+        l_mkt_trade_curry_id := l_trade_curry_id;
+
+        -- Lookup EUR
+        l_trade_curry_id := lookup.asset_id(
+          key_val  => fix.c_key_curry_iso_eur
+         ,key_type => fix.c_key_asset_iso
+        );
+
+      end if;
+    end if;
+
+    ---- OFF-BOOK TRADING PLACE FOR SIX? ----
+    l_is_off_book_trade := is_off_book_trade(i_m);
+
+    if l_is_off_book_trade then
+      assert(fix.c_mkt_id_swx     is not null
+         and fix.c_mkt_id_swx_otc is not null
+         and fix.c_mkt_id_vtx     is not null
+         and fix.c_mkt_id_vtx_otc is not null
+       ,'fix.c_mkt_id_swx/vtx and fix.c_mkt_id_swx_otc/vtx_otc are not null'
+      );
+
+      if l_mkt_id in (fix.c_mkt_id_swx, fix.c_mkt_id_vtx) then
+        if l_mkt_id = fix.c_mkt_id_swx then
+          l_mkt_id := fix.c_mkt_id_swx_otc;
+        else
+          l_mkt_id := fix.c_mkt_id_vtx_otc;
+        end if;
+      end if;
+    end if;
+
+    -- For a new execution order, always take actual quantity and price and not any aggregated info
+    ---- QUANTITY ----
+    l_qty := i_m.LastQty;
+
+    if l_qty is null or l_qty = 0 then
+      assert(false, 'l_qty is not null and l_qty != 0');
+    end if;
+
+    with i_m.StandardMessageHeader as i_m_StandardMessageHeader do
+
+      ---- EXTERNAL REFERENCE ----
+      if i_m.SecondaryExecID is not null then
+        -- Execution id assigned by the party which accepts the order
+        l_extl_ref_nr := i_m.SecondaryExecID;
+      else
+        if fix_in.has_daily_exec_id(i_m) then
+          -- Field ExecID is only unique on a daily basis, include sending date
+          l_send_time := i_m_StandardMessageHeader.SendingTime;
+        end if;
+
+        l_extl_ref_nr := fix_in.extl_ref_nr(
+          i_comp_id   => i_m_StandardMessageHeader.SenderCompID
+         ,i_cl_ord_id => i_m.ExecID
+         ,i_send_time => l_send_time
+        );
+      end if;
+
+    end with;
+
+    ---- EXECUTION TIME ----
+    l_exec_time := fix_in.trx_time(i_m);
+
+    ---- TRANSACTION DATE ----
+    l_trx_date := fix_in.trx_date(i_m);
+
+    ---- INTERNAL REFERENCE NUMBER ----
+    if i_clt_doc_id is not null then
+      l_intl_ref_nr := fix_in.intl_ref_nr(
+        i_cl_ord_id => i_clt_doc_id
+       ,i_ord_id    => i_m.OrderID
+      );
+    end if;
+
+    ---- CASCADE REFERENCE NUMBER ----
+    -- Not needed if the order addition is not active
+    if code_doc_extn_stex.cascade_ref_nr.activ = '+' then
+      l_cascade_ref_nr := fix_in.cascade_ref_nr(i_m);
+    end if;
+
+    --------------------------------------------------------------------------
+    -- OVERRIDE PARAMETERS TO GENERATE STEX EXECUTION
+    --------------------------------------------------------------------------
+    if fix_exe_rep_trade_in_css.do_ovr_prep_exec(i_m) then
+      begin
+
+        ---- CUSTOMER SITE SPECIFIC OVERRIDE FOR EXECUTION PREPARATION ----
+        -- Create and populate memory table with order attributes
+        with new mem_tab(null) as tab do
+
+          ---- CREATE MEMORY TABLE ----
+          -- Add column for asset identifier, related error flag
+          tab.cols.add_id(fix.c_col_name_asset_id, "obj_asset");
+          tab.cols.add_base(fix.c_col_name_asset_err, "boolean");
+
+          -- Add column for business partner identifier
+          tab.cols.add_id(fix.c_col_name_bp_id, "obj_bp");
+
+          -- Add column for container identifier, related error flag
+          tab.cols.add_id(fix.c_col_name_cont_id, "obj_cont");
+          tab.cols.add_base(fix.c_col_name_cont_err, "boolean");
+
+          -- Add column for order type identifier
+          tab.cols.add_base(fix.c_col_name_exec_ot_id, "number");
+
+          -- Add column for market identifier
+          tab.cols.add_id(fix.c_col_name_mkt_id, "obj_mkt");
+
+
+          ---- POPULATE MEMORY TABLE ----
+          with new tab.row_list as row do
+
+            -- Populate object identifier of asset, business partner, ...
+            row.fld(fix.c_col_name_asset_id).id_val := l_asset_id;
+            row.fld(fix.c_col_name_bp_id   ).id_val := l_bp_id;
+            row.fld(fix.c_col_name_cont_id ).id_val := l_cont_id;
+            row.fld(fix.c_col_name_mkt_id  ).id_val := l_mkt_id;
+
+            -- Populate boolean fields i.e. error flags
+            row.fld(fix.c_col_name_asset_err).bool_val := case l_has_err_asset when true then '+' else '-' end;
+            row.fld(fix.c_col_name_cont_err ).bool_val := case l_has_err_cont when true then  '+' else '-' end;
+
+            -- Populate number field i.e. order type identifier
+            row.fld(fix.c_col_name_exec_ot_id).number_val := l_exec_ot_id;
+
+            if l_do_debug then
+              fix.debug('ORDER ATTR : '
+                ||   'asset = ' || l_asset_id || case l_has_err_asset when true then ' has err' end
+                || ', bp = '    || l_bp_id
+                || ', cont = '  || l_cont_id  || case l_has_err_cont when true then ' has err' end
+                || ', mkt = '   || l_mkt_id
+                || ', ot = '    || l_exec_ot_id
+              );
+            end if;
+
+
+            ---- CUSTOMER SITE SPECIFIC OVERRIDE ORDER ATTRIBUTES ----
+            fix_exe_rep_trade_in_css.ovr_prep_exec(i_m, i_clt_doc_id, tab);
+
+
+            ---- UPDATE LOCAL VARIABLES, LOG UPDATED ATTRIBUTES ----
+            -- Update error flags
+            l_has_err_asset := coalesce(row.fld(fix.c_col_name_asset_err).bool_val, '+') = '+';
+            l_has_err_cont  := coalesce(row.fld(fix.c_col_name_cont_err).bool_val , '+') = '+';
+
+            -- Update object identifier
+            ---- ASSET ----
+            l_new_asset_id := row.fld(fix.c_col_name_asset_id).id_val;
+            if not equal.nr(l_asset_id, l_new_asset_id) then
+              l_asset_id := l_new_asset_id;
+              if l_do_debug then
+                fix.debug('Updated asset ' || l_asset_id || case l_has_err_asset when true then ' has err' end);
+              end if;
+            end if;
+
+            ---- BUSINESS PARTNER ----
+            l_new_bp_id := row.fld(fix.c_col_name_bp_id).id_val;
+            if not equal.nr(l_bp_id, l_new_bp_id) then
+              l_bp_id := l_new_bp_id;
+              if l_do_debug then
+                fix.debug('Updated bp ' || l_bp_id);
+              end if;
+            end if;
+
+            ---- CONTAINER ----
+            l_new_cont_id := row.fld(fix.c_col_name_cont_id).id_val;
+            if not equal.nr(l_cont_id, l_new_cont_id) then
+              l_cont_id := l_new_cont_id;
+              if l_do_debug then
+                fix.debug('Updated cont ' || l_cont_id  || case l_has_err_cont when true then ' has err' end);
+              end if;
+            end if;
+
+            ---- TRADING PLACE ----
+            l_new_mkt_id := row.fld(fix.c_col_name_mkt_id).id_val;
+            if not equal.nr(l_mkt_id, l_new_mkt_id) then
+              l_mkt_id := l_new_mkt_id;
+              if l_do_debug then
+                fix.debug('Updated mkt ' || l_mkt_id);
+              end if;
+            end if;
+
+            ---- ORDER TYPE ----
+            -- only allow order type update if i_clt_doc_id is null, otherwise log a warning
+            l_new_exec_ot_id := row.fld(fix.c_col_name_exec_ot_id).number_val;
+            if not equal.nr(l_exec_ot_id, l_new_exec_ot_id) then
+              if i_clt_doc_id is null then
+                l_exec_ot_id := l_new_exec_ot_id;
+                if l_do_debug then
+                  fix.debug('Updated ot ' || l_exec_ot_id);
+                end if;
+              else
+                if l_do_debug then
+                  fix.debug('i_clt_doc_id is defined, ignoring ot update ' || l_exec_ot_id);
+                end if;
+              end if;
+            end if;
+            if l_exec_ot_id is null then
+               assert(false, 'l_exec_ot_id is not null');
+            end if;
+
+          end with;
+
+        end with;
+
+        ---- UPDATE POST-IT IF REQUIRED ----
+        if l_has_err_asset then
+          if l_pit_text_inv_asset is null then
+            -- Invalid asset, take default asset instead, add post-it
+            l_asset_id := fix.c_dflt_asset_id;
+            l_pit_text_inv_asset := 'No asset found with key ' || l_instrumentSecurityID
+          end if;
+        else
+          -- Valid asset, clear post-it text
+          l_pit_text_inv_asset := null;
+        end if;
+
+        if l_has_err_cont then
+          if l_pit_text_inv_cont is null then
+            -- Unknown container, take default container instead, add post-it
+            l_cont_id := fix.c_dflt_cont_id;
+            l_pit_text_inv_cont := 'No business partner found for ' || cntprty_det(i_m);
+          end if;
+        else
+          -- Valid container, clear post-it text
+          l_pit_text_inv_cont := null;
+        end if;
+
+      exception
+        when others then
+          err.raise_fa(
+            'fix_exe_rep_trade_in.gen_exec'
+           ,'reason'       ,'failed overriding order parameters'
+           ,'msg_id'       ,i_m.head.msg_id
+           ,'l_asset_id'   ,l_asset_id
+           ,'l_bp_id'      ,l_bp_id
+           ,'l_cont_id'    ,l_cont_id
+           ,'l_exec_ot_id' ,l_exec_ot_id
+           ,'l_mkt_id'     ,l_mkt_id
+          );
+      end;
+    end if;
+
+    ---- PRICE ----
+    if    not l_has_err_asset
+      and i_m.LastParPx is not null
+      and i_m.PriceType in (fix.c_prc_type_discount, fix.c_prc_type_spread, fix.c_prc_type_yield)
+      and obj_asset(l_asset_id).dflt_price_quote_type_id
+            in (code_price_quote_type.perc
+               ,code_price_quote_type.perc_non_verse
+               ,code_price_quote_type.tk31
+               ,code_price_quote_type.perc_incl_corr)
+    then
+      l_price_fix := i_m.LastParPx;
+    else
+      l_price_fix := i_m.LastPx;
+    end if
+
+    if l_price_fix is null then
+      assert(false, 'l_price_fix is not null');
+    end if;
+
+    --------------------------------------------------------------------------
+    -- GENERATE EXECUTION
+    --------------------------------------------------------------------------
+    begin
+      l_exec_idx := doc_stex.new_doc(
+        -- Order Information
+        i_open_wfa_id      => fix.c_wfa_zero_open_tp_exec_id
+       ,i_order_type_id    => l_exec_ot_id
+       ,i_doc_role_id      => fix.c_role_stex_exec
+
+        -- Keys
+       ,i_intl_ref_nr      => l_intl_ref_nr
+       ,i_extl_ref_nr      => l_extl_ref_nr
+
+        -- Dates
+       ,i_trx_date         => l_trx_date
+       ,i_val_date         => i_m.SettlDate
+
+        -- Trading Party
+       ,i_bp_id            => l_bp_id
+       ,i_cont_id          => l_cont_id
+
+        -- Trade
+       ,i_qty              => l_qty
+       ,i_asset_id         => l_asset_id
+       ,i_mkt_id           => l_mkt_id
+       ,i_trade_curry_id   => l_trade_curry_id
+
+        -- Execution type
+       ,i_exec_time        => l_exec_time
+
+        -- Price
+       ,i_price_fix        => l_price_fix
+
+        -- Billing
+       ,i_intr_day_cnt     => i_m.NumDaysInterest
+       ,i_accr_intr        => i_m.AccruedInterestAmt
+        --
+       ,i_mkt_doc          => i_clt_doc
+      );
+    exception
+      when others then
+        err.raise_fa(
+          'fix_exe_rep_trade_in.gen_exec'
+         ,'reason'          ,'failed opening execution'
+         ,'msg_id'          ,i_m.head.msg_id
+         ,'l_open_wfa_id'   , fix.c_wfa_zero_open_tp_exec_id
+         ,'l_order_type_id' ,l_exec_ot_id
+         ,'l_bp_id'         ,l_bp_id
+         ,'l_cont_id'       ,l_cont_id
+         ,'l_qty'           ,l_qty
+         ,'l_asset_id'      ,l_asset_id
+         ,'l_mkt_id'        ,l_mkt_id
+         ,'i_curry_id'      ,l_trade_curry_id
+         ,'l_price_fix'     ,l_price_fix
+        );
+    end;
+
+    if l_exec_idx is null then
+      assert(false, 'l_doc_idx is not null');
+    end if;
+
+    --------------------------------------------------------------------------
+    -- COMPLETE EXECUTION
+    --------------------------------------------------------------------------
+    with mem_doc_stex(l_exec_idx) as stex do
+
+      ---- DISABLE CALCULATION ----
+      stex.do_calc := '-';
+
+      ---- SET CASCADE REFERENCE NUMEBR ----
+      if code_doc_extn_stex.cascade_ref_nr.activ = '+' then
+        stex.extn.cascade_ref_nr := l_cascade_ref_nr;
+      end if;
+
+      -- Flag execution in case of principal, nostro order
+      l_custOrderCapacity := i_m.CustOrderCapacity;
+      if    fix.c_do_mark_prpl_exec
+        and l_custOrderCapacity is not null
+        and l_custOrderCapacity = fix.c_cust_ord_capac_nostro
+      then
+        stex.ordered_by := fix.c_tra_capacity_prpl;
+      end if;
+
+      ---- SET CLIENT PRICE ON EXECUTION IF PROVIDED ----
+      l_clientPrice := i_m.ClientPrice;
+      if l_clientPrice is not null then
+        stex.price_clt := l_clientPrice;
+      end if;
+
+      -- Finalize currency settings on order; l_trade_curry_id has been set above
+      if    obj_curry(l_trade_curry_id).emu_curry = '-'
+        and i_m.Currency <> i_m.SettlCurrency
+      then
+        -- Currencies must be different and market trade curry must NOT be a euro-in curry (hard error otherwise)
+        -- Euro-in currencies are covered above before order creation
+
+        l_settl_curr_fx_rate := i_m.SettlCurrFxRate;
+
+        if i_clt_doc_id is not null then
+          with doc_stex(i_clt_doc_id) as clt do
+            if clt.mkt_trade_curry_id is not null then
+
+              if l_do_debug then
+                fix.debug('Execution group has already market trade currency, compare FX rates');
+              end if;
+
+              -- Check if xrate has changed; if yes add post-it to client order
+              if clt.xrate_mkt_bill <> i_m.SettlCurrFxRate then
+                -- Take fxrate from client order to maintain invariant
+                l_settl_curr_fx_rate := clt.xrate_mkt_bill;
+
+                if l_do_debug then
+                  fix.debug('Execution group has different market trade currency xrate, add post-it to client order');
+                end if;
+
+                l_pit_text_inv_curr := 'FX rate for trade currency vs. market trade currency on new trade different than on prior message: '
+                  || i_m.SettlCurrFxRate || ' vs. ' || clt.xrate_mkt_bill;
+
+                fix_in.add_postit(
+                  doc           => clt
+                 ,i_type_id     => fix.c_pit_type_warn
+                 ,i_sub_type_id => fix.c_pit_subtype_inv_curry
+                 ,i_topic       => fix.c_pit_topic_inv_curry
+                 ,i_text        => l_pit_text_inv_curr
+                );
+
+              end if;
+            end if;
+          end with;
+        end if;
+
+        -- Market trade currency to be set on actual execution order
+        if l_do_debug then
+          fix.debug('Set market trade currency on execution order ' || l_trade_curry_id);
+        end if;
+
+        l_mkt_trade_curry_id := l_trade_curry_id;
+
+        l_trade_curry_id := lookup.asset_id(
+          key_val  => i_m.SettlCurrency
+         ,key_type => fix.c_key_asset_iso
+        );
+
+        -- Set order's trading currency as new market trade currency
+        stex.mkt_trade_curry_id := l_mkt_trade_curry_id;
+
+        -- Set billing currency
+        stex.trade_curry_id := l_trade_curry_id;
+
+        -- Calculation of order's parameters to allow the setting of the billing exchange rate
+        stex.do_calc := '+';
+        stex.calc_all;
+        stex.do_calc := '-';
+
+        -- Set billing exchange rate
+        stex.xrate_mkt_bill := l_settl_curr_fx_rate;
+
+        -- Set accrued interest in market trade currency
+        if  i_m.AccruedInterestAmt is not null then
+          stex.accr_intr_mkt_trade_curry := i_m.AccruedInterestAmt;
+        end if;
+
+      elsif l_mkt_trade_curry_id is not null then
+        -- Euro-in currency; Euro already set; l_mkt_trade_curry_id was set above before order creation
+        stex.mkt_trade_curry_id := l_mkt_trade_curry_id;
+
+        if  i_m.AccruedInterestAmt is not null then
+          -- Calculation of order's parameters to allow the setting of the accrued interest
+          stex.do_calc := '+';
+          stex.calc_all;
+          stex.do_calc := '-';
+          stex.accr_intr_mkt_trade_curry := i_m.AccruedInterestAmt;
+        end if;
+
+      end if;
+
+      ---- SET AWAITING CONFIRMATION STATUS ----
+      stex.is_await_conf := case i_is_await_conf when true then '+' else '-' end;
+
+      ---- SET BROKER NETWORK ID ----
+      stex.tra_intf_brk_netw_id := code_const.netw_fix;
+
+      ---- SET AGGREGATION KEY ----
+      stex.aggr_key := i_aggr_key;
+
+      if fix_exe_rep_trade_in_css.do_ovr_compl_exec(i_m) then
+        ---- CUSTOMER SITE SPECIFIC OVERRIDE COMPLETE EXECUTION ----
+        fix_exe_rep_trade_in_css.ovr_compl_exec(i_m, l_exec_idx);
+      end if;
+
+      ---- ENABLE CALCULATION AND CALC ----
+      stex.do_calc := '+';
+      stex.calc_all;
+
+
+      ---- ADD POST-IT IN CASE OF INSTRUCTION FOR BACK OFFICE ----
+      with i_m.PostItList as i_m_PostItList do
+
+        if i_m_PostItList.NoPostIts is not null then
+          for pit in i_m_PostItList.PostItGroup loop
+            if    pit.PostItType    = fix.c_pit_type_info
+              and pit.PostItSubType = fix.c_pit_subtype_bo_instr
+            then
+              if l_do_debug then
+                fix.debug('Add post-it for back office instruction');
+              end if;
+              fix_in.add_postit(
+                doc           => stex
+               ,i_type_id     => fix.c_pit_type_info
+               ,i_sub_type_id => fix.c_pit_subtype_bo_instr
+               ,i_topic       => pit.PostItTopic
+               ,i_text        => pit.PostItText
+              );
+            end if;
+          end loop;
+        end if;
+
+      end with;
+
+      ---- HANDLE CASE MONEY ACCOUNT IS UNDEFINED OR INVALID----
+      if    stex.macc_id is null
+        and stex.cont_id is not null
+      then
+        -- Missing money account, take default container
+        l_cont_id := fix.c_dflt_cont_id;
+        l_pit_text_miss_macc := 'Money account missing for container ' ||
+          stex.cont_id || ' and currency ' || stex.trade_curry.extn.asset_iso;
+        l_has_err_macc := true;
+
+        -- Update container of order
+        stex.cont_id := l_cont_id;
+
+      elsif stex.macc_id is not null
+        and (stex.macc.close_date <= l_today
+          or stex.macc.open_date  >  l_today)
+      then
+        -- Invalid money account, take default container
+        l_cont_id := fix.c_dflt_cont_id;
+        l_pit_text_inv_macc := 'Invalid money account ' || stex.macc_id || ' for container '
+          || stex.cont_id || ' and currency ' || stex.trade_curry.extn.asset_iso;
+        l_has_err_macc := true;
+
+        -- Update container of order
+        stex.cont_id := l_cont_id;
+      end if;
+
+      if stex.macc_id is null then
+        assert(false, 'stex.macc_id is not null');
+      end if;
+
+      ---- ADD POST-IT IN CASE OF ERROR ----
+      if l_has_err_cont then
+        if l_do_debug then
+          fix.debug('Add post-it invalid container');
+        end if;
+        fix_in.add_postit(
+          doc           => stex
+         ,i_type_id     => fix.c_pit_type_err
+         ,i_sub_type_id => fix.c_pit_subtype_inv_cont
+         ,i_topic       => fix.c_pit_topic_inv_cont
+         ,i_text        => l_pit_text_inv_cont
+        );
+      end if;
+
+      if l_has_err_asset then
+        if l_do_debug then
+          fix.debug('Add post-it invalid asset');
+        end if;
+        fix_in.add_postit(
+          doc           => stex
+         ,i_type_id     => fix.c_pit_type_err
+         ,i_sub_type_id => fix.c_pit_subtype_inv_asset
+         ,i_topic       => fix.c_pit_topic_inv_asset
+         ,i_text        => l_pit_text_inv_asset
+        );
+      end if;
+
+      if l_has_err_macc then
+        if l_pit_text_miss_macc is not null then
+          if l_do_debug then
+            fix.debug('Add post-it missing money account');
+          end if;
+          fix_in.add_postit(
+            doc           => stex
+           ,i_type_id     => fix.c_pit_type_err
+           ,i_sub_type_id => fix.c_pit_subtype_miss_macc
+           ,i_topic       => fix.c_pit_topic_miss_macc
+           ,i_text        => l_pit_text_miss_macc
+          );
+        end if;
+
+        if l_pit_text_inv_macc is not null then
+          if l_do_debug then
+            fix.debug('Add post-it invalid money account');
+          end if;
+          fix_in.add_postit(
+            doc           => stex
+           ,i_type_id     => fix.c_pit_type_err
+           ,i_sub_type_id => fix.c_pit_subtype_inv_macc
+           ,i_topic       => fix.c_pit_topic_inv_macc
+           ,i_text        => l_pit_text_inv_macc
+          );
+        end if;
+
+      end if;
+
+      ---- FETCH ORDER IDENTIFIER ----
+      l_exec_doc_id := stex.doc_id;
+
+    end with;
+
+
+    --------------------------------------------------------------------------
+    -- PROCEED EXECUTION
+    --------------------------------------------------------------------------
+    with mem_doc_stex(l_exec_idx) as stex do
+      begin
+        if   l_has_err_asset
+          or l_has_err_cont
+          or l_has_err_macc
+        then
+
+          ---- TRANSITION TO STATUS 'TP: Order Error' ----
+          stex.do_wfc_action(
+            wfc_action_id => fix.c_wfa_tp_err_id
+           ,no_commit     => '+'
+          );
+
+        else
+
+          ---- TRY TRANSITION TO STATUS 'TP: Ready for Execution' ----
+          stex.try_wfa(
+            wfa_id                 => fix.c_wfa_tp_proceed_id
+           ,err_wfa_id             => fix.c_wfa_tp_err_id
+           ,do_add_err_postit      => '+'
+           ,err_postit_type_id     => fix.c_pit_type_err
+           ,err_postit_sub_type_id => fix.c_pit_subtype_wfa_fail
+          );
+
+        end if;
+
+      exception
+        when others then
+          err.raise_fa(
+            'fix_exe_rep_trade_in.gen_exec'
+           ,'reason'          ,'failed proceed execution'
+           ,'msg_id'          ,i_m.head.msg_id
+           ,'wfa_id'          ,fix.c_wfa_tp_proceed_id
+           ,'err_wfa_id'      ,fix.c_wfa_tp_err_id
+           ,'l_order_type_id' ,l_exec_ot_id
+           ,'l_bp_id'         ,l_bp_id
+           ,'l_cont_id'       ,l_cont_id
+           ,'l_qty'           ,l_qty
+           ,'l_asset_id'      ,l_asset_id
+           ,'l_mkt_id'        ,l_mkt_id
+           ,'i_curry_id'      ,l_trade_curry_id
+           ,'l_price_fix'     ,l_price_fix
+          );
+      end;
+    end with;
+
+    ---- RETURN IDENTIFIER OF EXECUTION ----
+    return l_exec_doc_id;
+
+  exception
+    when others then
+      err.raise_fa(
+        'fix_exe_rep_trade_in.gen_exec'
+       ,'reason'   ,session.log_mgr.last_log_msg
+       ,'msg_id'   ,i_m.head.msg_id
+      );
+  end gen_exec;
+
+
+  ----------------------------------------------------------------------------
+  -- PROCEDURES
+  ----------------------------------------------------------------------------
+
+  ----------------------------------------------------------------------------
+  -- Handle aggregation of execution orders
+  -- Update execution, execute against market order
+  -- For each partial execution, update the quantity, fixed price and
+  -- execution time based on TAG CumQty, AvgPx and TransactTime respectively.
+  ----------------------------------------------------------------------------
+  procedure hdl_aggr_exec(
+    i_m                     mem_msg_fix_exe_rep
+   ,i_doc_idx               id mem_doc_stex
+   ,i_exec_idx              id mem_doc_stex
+   ,i_aggr_key              text := null
+  )
+  is
+
+    -- Identifier of client order, execution
+    l_clt_doc_id            id doc_stex;
+    l_exec_doc_id           id doc_stex;
+
+    -- Already billed quantity
+    l_bill_qty              number;
+
+    -- Local order value buffers
+    l_msg_val               number;
+    l_ord_val               number;
+
+    -- Local caches
+    l_lastQty               number;
+    l_clientPrice           number;
+    l_accruedInterestAmt    number;
+
+    -- Debug flag
+    l_do_debug               boolean := fix.c_do_debug;
+
+  begin
+
+    if i_m is null or i_doc_idx is null or i_exec_idx is null then
+      require(false, 'i_m is not null and i_doc_idx is not null and i_exec_idx is not null');
+    end if;
+
+    if l_do_debug then
+      fix.set_debug_hdr('FIX_EXE_REP_TRADE_IN.HDL_AGGR_EXEC');
+    end if;
+
+    --------------------------------------------------------------------------
+    -- UPDATE EXECUTION ORDER
+    --------------------------------------------------------------------------
+    with mem_doc_stex(i_exec_idx) as stex_exec do
+
+      ---- DISABLE CALCULATION ----
+      stex_exec.do_calc := '-';
+
+      l_lastQty := i_m.LastQty;
+      l_ord_val := abs(stex_exec.qty) * stex_exec.price_fix;
+
+      if    i_m.LastParPx is not null
+        and i_m.PriceType in (fix.c_prc_type_discount, fix.c_prc_type_spread, fix.c_prc_type_yield)
+        and obj_asset(stex_exec.asset_id).dflt_price_quote_type_id
+            in (code_price_quote_type.perc
+               ,code_price_quote_type.perc_non_verse
+               ,code_price_quote_type.tk31
+               ,code_price_quote_type.perc_incl_corr)
+      then
+        l_msg_val := abs(l_lastQty) * i_m.LastParPx;
+      else
+        l_msg_val := abs(l_lastQty) * i_m.LastPx;
+      end if;
+
+      stex_exec.qty := abs(stex_exec.qty) + abs(l_lastQty);
+
+      ---- FIXED PRICE SET TO NEW AVERAGE PRICE ----
+      stex_exec.price_fix := (l_ord_val + l_msg_val) / abs(stex_exec.qty);
+
+      ---- EXECUTION TIME ----
+      if fix_in.trx_time(i_m) > stex_exec.exec_time then
+        -- Overwrite execution time if more actual
+        stex_exec.exec_time := fix_in.trx_time(i_m);
+
+        ---- SET CLIENT PRICE ON EXECUTION IF PROVIDED AND IF ACTUAL ----
+        l_clientPrice := i_m.ClientPrice;
+        if l_clientPrice is not null then
+          stex_exec.price_clt := l_clientPrice;
+        end if;
+      end if
+
+
+      ---- AGGREGATE ACCRUED INTEREST ----
+      l_accruedInterestAmt := i_m.AccruedInterestAmt;
+      if l_accruedInterestAmt is not null then
+        stex_exec.accr_intr := coalesce(stex_exec.accr_intr, 0) + l_accruedInterestAmt;
+        if l_do_debug then
+          fix.debug('Increased accrued interest to ' || stex_exec.accr_intr);
+        end if;
+      end if;
+
+      if fix_exe_rep_trade_in_css.do_ovr_compl_exec(i_m) then
+        ---- CUSTOMER SITE SPECIFIC OVERRIDE COMPLETE EXECUTION ----
+        fix_exe_rep_trade_in_css.ovr_compl_exec(i_m, i_exec_idx);
+      end if;
+
+      ---- ENABLE CALCULATION AND CALC ----
+      stex_exec.do_calc := '+';
+      stex_exec.calc_all;
+
+
+      ---- ADD POST-IT IN CASE OF INSTRUCTION FOR BACK OFFICE ----
+      with i_m.PostItList as i_m_PostItList do
+
+        if i_m_PostItList.NoPostIts is not null then
+          for pit in i_m_PostItList.PostItGroup loop
+            if    pit.PostItType    = fix.c_pit_type_info
+              and pit.PostItSubType = fix.c_pit_subtype_bo_instr
+            then
+              if l_do_debug then
+                fix.debug('Add post-it for back office instruction');
+              end if;
+              fix_in.add_postit(
+                doc           => stex_exec
+               ,i_type_id     => fix.c_pit_type_info
+               ,i_sub_type_id => fix.c_pit_subtype_bo_instr
+               ,i_topic       => pit.PostItTopic
+               ,i_text        => pit.PostItText
+              );
+            end if;
+          end loop;
+        end if;
+
+      end with;
+
+      ---- FETCH ORDER IDENTIFIER ----
+      l_exec_doc_id := stex_exec.doc_id;
+      assert(l_exec_doc_id is not null, 'l_exec_doc_id is not null');
+
+    end with;
+
+    ---- FETCH IDENTIFIER OF CLIENT ORDER ----
+    with mem_doc_stex(i_doc_idx) as stex_clt do
+      l_clt_doc_id := stex_clt.doc_id;
+      assert(l_clt_doc_id is not null, 'l_clt_doc_id is not null');
+    end with;
+
+
+    --------------------------------------------------------------------------
+    -- EXECUTE AGAINST CLIENT ORDER WITH MODIFY
+    --------------------------------------------------------------------------
+    begin
+
+      doc_stex.execute(
+        i_clt_doc_id  => l_clt_doc_id
+       ,i_exec_doc_id => l_exec_doc_id
+       ,i_do_reset    => false
+       ,i_do_mdf_grp  => (i_aggr_key is null)
+       ,i_do_commit   => false
+      );
+      if l_do_debug then
+        fix.debug('Executed against client order ' || l_clt_doc_id);
+      end if;
+
+    exception
+      when others then
+        err.raise_fa(
+          'fix_exe_rep_trade_in.hdl_aggr_exec'
+         ,'reason'        ,'failed executing against client order'
+         ,'msg_id'        ,i_m.head.msg_id
+         ,'l_clt_doc_id'  ,l_clt_doc_id
+         ,'l_exec_doc_id' ,l_exec_doc_id
+        );
+    end;
+
+    ---- LINK MESSAGE TO EXECUTION ----
+    i_m.head.doc_id := l_exec_doc_id;
+
+  exception
+    when others then
+      err.raise_fa(
+        'fix_exe_rep_trade_in.hdl_aggr_exec'
+       ,'reason'  ,session.log_mgr.last_log_msg
+       ,'msg_id'  ,i_m.head.msg_id
+      );
+  end hdl_aggr_exec;
+
+
+  ----------------------------------------------------------------------------
+  -- Handle solicited trade
+  --
+  -- Create execution, execute against market order if first execution
+  --
+  -- Incoming trade belongs to order sent to broker before modification:
+  -- Order not executed   => Transition to status Awaiting Confirmation
+  --                         with modification of execution group
+  --
+  -- Incoming trade belongs to order sent to broker after modification:
+  -- Order not executed   => Transition to status Awaiting Confirmation
+  --                         without modification of execution group
+  --
+  -- Same behavior for both cases:
+  -- Order still executed => Transition to status Fully Executed / Done
+  ----------------------------------------------------------------------------
+  procedure hdl_sol_trade(
+    i_m                      mem_msg_fix_exe_rep
+   ,i_doc_idx                id mem_doc_stex
+   ,i_aggr_key               text := null
+  )
+  is
+
+    -- Flag indicating whether client order is executed
+    l_clt_is_executed        boolean := true;
+
+    -- Flag indicating whether execution order is awaiting a confirmation
+    l_is_await_conf          boolean := false;
+
+    -- Flag indicating whether the placement is executed
+    l_place_is_executed      boolean := true;
+
+    -- Identifier of client order, execution
+    l_clt_doc_id             id doc_stex;
+    l_exec_doc_id            id doc_stex;
+
+    -- Index of client order, execution in memory
+    l_clt_idx                id mem_doc_stex;
+    l_exec_idx               id mem_doc_stex;
+
+    -- Order type of execution order
+    l_exec_ot_id             number;
+
+    -- Workflow action identifier how to proceed market, execution order
+    l_wfa_mkt_proceed_id     number;
+    l_wfa_exec_proceed_id    number;
+
+    -- External, internal reference of client order
+    l_extl_ref_nr            text;
+    l_intl_ref_nr            text;
+
+    -- Debug flag
+    l_do_debug               boolean := fix.c_do_debug;
+  begin
+
+    if i_m is null or i_doc_idx is null then
+      require(false, 'i_m is not null and i_doc_idx is not null');
+    end if;
+
+    if l_do_debug then
+      fix.set_debug_hdr('FIX_EXE_REP_TRADE_IN.HDL_SOL_TRADE');
+    end if;
+
+    --------------------------------------------------------------------------
+    -- EXTRACT ID, EXECUTION STATUS FROM CLIENT / MARKET ORDER
+    --------------------------------------------------------------------------
+    with mem_doc_stex(i_doc_idx) as stex_clt do
+
+      l_clt_doc_id := stex_clt.doc_id;
+      if l_clt_doc_id is null then
+        assert(false, 'l_clt_doc_id is not null');
+      end if;
+
+      l_clt_is_executed := coalesce(stex_clt.exec_is_not_executed = '-', false);
+      if l_clt_is_executed is null then
+        assert(false, 'l_clt_is_executed is not null');
+      end if;
+
+      if l_clt_is_executed then
+
+        ---- ORDER TYPE ----
+        l_exec_ot_id := fix_in.cnt_order_type_id(
+          i_side       => i_m.Side
+         ,i_exec_type  => i_m.ExecType
+         ,i_pos_effect => i_m.PositionEffect
+        );
+        if l_exec_ot_id is null then
+          assert(false, 'l_exec_ot_id is not null');
+        end if;
+        l_intl_ref_nr := fix_in.intl_ref_nr(
+          i_cl_ord_id => l_clt_doc_id
+         ,i_ord_id    => i_m.OrderID
+        );
+
+        -- Determine if order at broker is partially executed
+        -- In this case, we should find an execution order with an internal
+        -- reference, containing the OrderID as defined by the broker.
+        l_place_is_executed := lookup.doc_list.count(
+          intl_ref_nr   => l_intl_ref_nr
+         ,meta_typ_id   => fix.c_meta_type_stex
+         ,order_type_id => l_exec_ot_id
+         ,val_date      => i_m.SettlDate
+        ) > 0;
+
+      end if;
+
+
+      ------------------------------------------------------------------------
+      -- TRANSITION OF CLIENT ORDER TO TP: PLACED IF STILL IN TP: SENDING
+      ------------------------------------------------------------------------
+      if stex_clt.wfc_status_id = fix.c_wfs_tp_sending then
+        begin
+          -- Can only happen if Execution Report New message not yet processed
+
+          ---- EXTERNAL REFERENCE OF ORDER ----
+          l_extl_ref_nr := fix_in.extl_ref_nr(
+            i_comp_id   => i_m.StandardMessageHeader.SenderCompID
+           ,i_cl_ord_id => i_m.OrderID
+          );
+          if l_do_debug then
+            fix.debug('Set external reference ' || l_extl_ref_nr || ' on market order ' || l_clt_doc_id);
+          end if;
+
+          -- Unique identifier for order as assigned by sell-side
+          stex_clt.extl_ref_nr := l_extl_ref_nr;
+
+          ---- TRY PROCEED WORKFLOW ACTION ----
+          stex_clt.try_wfa(
+            wfa_id                 => fix.c_wfa_tp_proceed_id
+           ,err_wfa_id             => fix.c_wfa_tp_err_id
+           ,do_add_err_postit      => '+'
+           ,err_postit_type_id     => fix.c_pit_type_err
+           ,err_postit_sub_type_id => fix.c_pit_subtype_wfa_fail
+          );
+
+        exception
+          when others then
+             err.raise_fa(
+               'fix_exe_rep_trade_in.hdl_sol_trade'
+              ,'reason'           ,'failed proceed market order to TP Placed'
+              ,'msg_id'           ,i_m.head.msg_id
+              ,'wfa_id'           ,fix.c_wfa_tp_proceed_id
+              ,'err_wfa_id'       ,fix.c_wfa_tp_err_id
+              ,'err_pit_type_id'  ,fix.c_pit_type_err
+              ,'err_pit_stype_id' ,fix.c_pit_subtype_wfa_fail
+              ,'except_msg'       ,session.log_mgr.avq_excp_msg
+             );
+        end;
+      end if;
+    end with;
+
+    ---- EVALUATE AWAITING CONFIRMATION STATUS ----
+    -- True if the broker is in update list and the current broker order
+    -- - either is not executed (i.e. the first execution)
+    -- - or has an aggregation key
+    l_is_await_conf :=     fix_in.do_upd_exec(i_m)
+                       and (not (l_clt_is_executed and l_place_is_executed)
+                        or i_aggr_key is not null);
+
+    --------------------------------------------------------------------------
+    -- GENERATE EXECUTION
+    --------------------------------------------------------------------------
+    l_exec_doc_id := gen_exec(
+      i_m             => i_m
+     ,i_clt_doc_id    => l_clt_doc_id
+     ,i_is_await_conf => l_is_await_conf
+     ,i_clt_doc       => i_doc_idx
+     ,i_aggr_key      => i_aggr_key
+    );
+    if l_exec_doc_id is null then
+      assert(false, 'l_exec_doc_id is not null');
+    end if;
+    if l_do_debug then
+      fix.debug('Created execution with id ' || l_exec_doc_id);
+    end if;
+
+
+    --------------------------------------------------------------------------
+    -- DECIDE IF EXECUTION ORDER SHOULD BE STOPPED HERE IN STATUS
+    -- 'TP: Ready for Execution' TO BE ASYNCHRONOUSLY EXECUTED BY TASK
+    --------------------------------------------------------------------------
+    if not fix_exe_rep_trade_in_css.do_proceed_exec(i_m => i_m) then
+
+      fix.debug('Execution stopped in status TP: Ready for Execution, ' || l_exec_doc_id);
+
+      ---- LINK MESSAGE TO EXECUTION ----
+      i_m.head.doc_id := l_exec_doc_id;
+
+      return;
+
+    end if;
+
+
+    --------------------------------------------------------------------------
+    -- EXECUTE AGAINST CLIENT ORDER WITH MODIFY IF FIRST EXECUTION
+    --------------------------------------------------------------------------
+    if not l_clt_is_executed then
+
+      ------------------------------------------------------------------------
+      -- CREATE EXECUTION GROUP WITH CLIENT ORDER AND EXECUTION IN MEMORY
+      -- Handle case one of the orders is in error status as follows:
+      -- Execute is done in any case.
+      -- For this purpose a catch all rule was added for exec#proceed.
+      -- Order in error status manually to be corrected.
+      -- Afterwards re-execute is done and everything should be fine.
+      ------------------------------------------------------------------------
+      begin
+
+        if fix_in.do_upd_exec(i_m) then
+          -- Need to proceed market order to status 'TP: Awaiting Confirmation'
+          l_wfa_mkt_proceed_id := fix.c_wfa_tp_hold_id;
+          if l_do_debug then
+            fix.debug('Proceed market order to TP: Awaiting Confirmation');
+          end if;
+
+          -- Need to proceed first execution to status 'TP: Awaiting Confirmation'
+          l_wfa_exec_proceed_id := fix.c_wfa_tp_hold_id;
+          if l_do_debug then
+            fix.debug('Proceed execution to TP: Awaiting Confirmation');
+          end if;
+        end if;
+
+        doc_stex.execute(
+          i_clt_doc_id             => l_clt_doc_id
+         ,i_exec_doc_id            => l_exec_doc_id
+         ,i_mkt_proceed_action_id  => l_wfa_mkt_proceed_id
+         ,i_exec_proceed_action_id => l_wfa_exec_proceed_id
+         ,i_do_reset               => false
+         ,i_do_mdf_grp             => true
+         ,i_do_commit              => false
+        );
+        if l_do_debug then
+          fix.debug('Created execution group with client order ' || l_clt_doc_id);
+        end if;
+
+      exception
+        when others then
+          err.raise_fa(
+            'fix_exe_rep_trade_in.hdl_sol_trade'
+           ,'reason' ,'failed creating execution group of client order and execution'
+           ,'msg_id' ,i_m.head.msg_id
+          );
+      end;
+
+      ---- LINK MESSAGE TO EXECUTION ----
+      i_m.head.doc_id := l_exec_doc_id;
+
+      return;
+
+
+    --------------------------------------------------------------------------
+    -- EXECUTE AGAINST CLIENT ORDER WITHOUT MODIFY IF FIRST EXECUTION OF
+    -- THE NEW BROKER ORDER AFTER MODIFICATION WITH CANCEL / NEW AT CLIENT
+    --------------------------------------------------------------------------
+    elsif not l_place_is_executed or i_aggr_key is not null then
+
+      ------------------------------------------------------------------------
+      -- CREATE EXECUTION GROUP WITH CLIENT ORDER AND EXECUTION IN MEMORY
+      -- Handle case one of the orders is in error status as follows:
+      -- Execute is done in any case.
+      -- For this purpose a catch all rule was added for exec#proceed.
+      -- Order in error status manually to be corrected.
+      -- Afterwards re-execute is done and everything should be fine.
+      ------------------------------------------------------------------------
+      begin
+
+        if fix_in.do_upd_exec(i_m) then
+          -- Need to proceed market order to status 'TP: Awaiting Confirmation'
+          l_wfa_mkt_proceed_id := fix.c_wfa_tp_hold_id;
+          if l_do_debug then
+            fix.debug('Proceed market order to TP: Awaiting Confirmation');
+          end if;
+
+          -- Need to proceed first execution to status 'TP: Awaiting Confirmation'
+          l_wfa_exec_proceed_id := fix.c_wfa_tp_hold_id;
+          if l_do_debug then
+            fix.debug('Proceed execution to TP: Awaiting Confirmation');
+          end if;
+        end if;
+
+        ----------------------------------------------------------------------
+        -- Execute and proceed order to 'TP: Awaiting Confirmation' /
+        -- 'BO: Done' but do not modify the whole execution group since
+        -- tp_hold would also proceed other executions from status
+        -- 'TP: Awaiting Confirmation' to status 'BO: Done'
+        ----------------------------------------------------------------------
+        doc_stex.execute(
+          i_clt_doc_id             => l_clt_doc_id
+         ,i_exec_doc_id            => l_exec_doc_id
+         ,i_mkt_proceed_action_id  => l_wfa_mkt_proceed_id
+         ,i_exec_proceed_action_id => l_wfa_exec_proceed_id
+         ,i_do_reset               => false
+         ,i_do_mdf_grp             => false
+         ,i_do_commit              => false
+        );
+        if l_do_debug then
+          fix.debug('Created execution group with client order ' || l_clt_doc_id);
+        end if;
+
+      exception
+        when others then
+          err.raise_fa(
+            'fix_exe_rep_trade_in.hdl_sol_trade'
+           ,'reason' ,'failed creating execution group of client order and execution'
+           ,'msg_id' ,i_m.head.msg_id
+          );
+      end;
+
+      ---- LINK MESSAGE TO EXECUTION ----
+      i_m.head.doc_id := l_exec_doc_id;
+
+      return;
+
+    end if;
+
+
+    --------------------------------------------------------------------------
+    -- EXECUTE AGAINST CLIENT ORDER WITHOUT MODIFY FOR FOLLOWING EXECUTIONS
+    -- In case one of the execution group invariants is violated,
+    -- an exception is raised and the execute is skipped.
+    -- For performance reasons further executions are executed by a task
+    --------------------------------------------------------------------------
+    begin
+
+      doc_stex.execute(
+        i_clt_doc_id  => l_clt_doc_id
+       ,i_exec_doc_id => l_exec_doc_id
+       ,i_do_reset    => false
+       ,i_do_mdf_grp  => false
+       ,i_do_commit   => false
+      );
+      if l_do_debug then
+        fix.debug('Executed against client order ' || l_clt_doc_id);
+      end if;
+
+    exception
+      when others then
+        -- For performance reasons further executions are executed by a task
+        fix.debug('Failed executing against client order ' || l_clt_doc_id);
+    end;
+
+    ---- LINK MESSAGE TO EXECUTION ----
+    i_m.head.doc_id := l_exec_doc_id;
+
+  exception
+    when others then
+      err.raise_fa(
+        'fix_exe_rep_trade_in.hdl_sol_trade'
+       ,'reason'   ,session.log_mgr.last_log_msg
+       ,'msg_id'   ,i_m.head.msg_id
+      );
+  end hdl_sol_trade;
+
+
+  ----------------------------------------------------------------------------
+  -- Handle trade reversal
+  -- Create both the execution and the client order
+  -- Default nostro container is taken for client order
+  -- Post-it added that indicates original client order
+  ----------------------------------------------------------------------------
+  procedure hdl_trade_revs(
+    i_m                      mem_msg_fix_exe_rep
+  )
+  is
+
+    -- Identifier of client order, execution, original client order
+    l_clt_doc_id             id doc_stex;
+    l_exec_doc_id            id doc_stex;
+    l_orig_clt_doc_id        id doc_stex;
+
+    -- Index of client order, execution in memory
+    l_clt_idx                id mem_doc_stex;
+    l_exec_idx               id mem_doc_stex;
+
+    -- Identifier of container of client order
+    l_clt_cont_id            id obj_cont;
+
+    -- External reference of order, post-it text
+    l_extl_ref_nr            text;
+    l_pit_text               text;
+
+    -- Local caches
+    l_price                  number;
+    l_stopPx                 number;
+    l_timeInForce            text;
+    l_expireTime             text;
+    l_expireDate             date;
+
+    -- Debug flag
+    l_do_debug               boolean := fix.c_do_debug;
+  begin
+
+    if i_m is null then
+      require(false, 'i_m is not null');
+    end if;
+
+    if l_do_debug then
+      fix.set_debug_hdr('FIX_EXE_REP_TRADE_IN.HDL_TRADE_REVS');
+    end if;
+
+    --------------------------------------------------------------------------
+    -- GENERATE EXECUTION
+    --------------------------------------------------------------------------
+    l_exec_doc_id := gen_exec(i_m => i_m);
+    assert(l_exec_doc_id is not null, 'l_exec_doc_id is not null');
+    if l_do_debug then
+      fix.debug('Created execution with id ' || l_exec_doc_id);
+    end if;
+
+
+    --------------------------------------------------------------------------
+    -- DETERMINE CLIENT CONTAINER FOR CUSTOMER / NOSTRO TRADING
+    --------------------------------------------------------------------------
+    -- Get default container for either customer or nostro trading
+    l_clt_cont_id := fix_in.dflt_clt_cont(i_m.CustOrderCapacity);
+    assert(l_clt_cont_id is not null, 'l_clt_cont_id is not null');
+
+
+    --------------------------------------------------------------------------
+    -- GENERATE CLIENT ORDER FOR GIVEN EXECUTION
+    --------------------------------------------------------------------------
+    l_clt_idx := doc_stex.exec#gen_clt (
+      i_exec_doc_id        => l_exec_doc_id
+     ,i_clt_cont_id        => l_clt_cont_id
+     ,i_clt_open_action_id => fix.c_wfa_zero_open_tp_order_id
+     ,i_do_reset           => false
+    );
+    if l_do_debug then
+      fix.debug('Opened client order for given execution');
+    end if;
+
+
+    --------------------------------------------------------------------------
+    -- COMPLETE CLIENT ORDER
+    --------------------------------------------------------------------------
+    with mem_doc_stex(l_clt_idx) as stex do
+
+      ---- DISABLE CALCULATION ----
+      stex.do_calc := '-';
+
+      ---- QUANTITY ----
+      stex.qty := i_m.CumQty + i_m.LeavesQty;
+      assert(stex.qty is not null, 'stex.qty is not null');
+
+      ---- LIMIT ----
+      l_price := i_m.Price;
+      if coalesce(l_price, 0) != 0 then
+        stex.limit := l_price;
+      end if;
+
+      ---- TRIGGER PRICE ----
+      l_stopPx := i_m.StopPx;
+      if coalesce(l_stopPx, 0) != 0 then
+        stex.trig_price := l_stopPx;
+      end if;
+
+      ---- EXPIRATION DATE ----
+      l_timeInForce := i_m.TimeInForce;
+      l_expireTime  := i_m.ExpireTime;
+      l_expireDate  := i_m.ExpireDate;
+
+      -- NON MARKET ORDER TYPE --
+      if not (avq$base_par_doc_stex.enbl_mkt_order_type = '+') then
+        if   l_timeInForce is null
+          or l_timeInForce = fix.c_time_in_force_day
+        then
+          -- Day order, expiration just before midnight
+          stex.expir_date := session.today + (1-1/(24*60*60));
+
+        elsif l_timeInForce is not null
+          and l_timeInForce = fix.c_time_in_force_date
+        then
+          l_expireTime := i_m.ExpireTime;
+          l_expireDate := i_m.ExpireDate;
+          if l_expireTime is null and l_expireDate is not null then
+            stex.expir_date := l_expireDate + (1-1/(24*60*60));
+          elsif l_expireTime is not null then
+            stex.expir_date := fix.utc_to_locl_time(l_expireTime);
+          end if;
+        end if;
+
+      -- MARKET ORDER TYPE --
+      else
+        ---- EXECUTION TYPE ----
+        if i_m.MaxFloor is not null then
+          stex.exec_type_id := code_order_sub_type.ice;
+        else
+          case i_m.OrdType
+            when fix.c_ord_type_mkt          then stex.exec_type_id := code_order_sub_type.mkt;
+            when fix.c_ord_type_limit        then stex.exec_type_id := code_order_sub_type.lim;
+            when fix.c_ord_type_stop         then stex.exec_type_id := code_order_sub_type.stop_mkt;
+            when fix.c_ord_type_stop_limit   then stex.exec_type_id := code_order_sub_type.stop_limit;
+            when fix.c_ord_type_mkt_to_limit then stex.exec_type_id := code_order_sub_type.mkt_to_limit;
+            else                                  stex.exec_type_id := code_order_sub_type.unkn;
+          end case;
+        end if;
+
+        ---- EXECUTION RESTRICTION / VALIDITY CONSTRAINT / EXPIRATION DATE ----
+        if l_timeInForce = fix.c_time_in_force_ioc then
+          stex.stex_exec_restr_id   := code_stex_exec_restr.ioc;
+          stex.stex_valid_constr_id := code_stex_valid_constr.gfd;
+        elsif l_timeInForce = fix.c_time_in_force_fok then
+          stex.stex_exec_restr_id   := code_stex_exec_restr.fok;
+          stex.stex_valid_constr_id := code_stex_valid_constr.gfd;
+        else
+          case l_timeInForce
+            -- GFD
+            when fix.c_time_in_force_day then
+              stex.stex_valid_constr_id := code_stex_valid_constr.gfd;
+            -- GTD
+            when fix.c_time_in_force_date then
+              stex.stex_valid_constr_id := code_stex_valid_constr.gtd;
+              if l_expireTime is null and l_expireDate is not null then
+                stex.expir_date := l_expireDate + (1-1/(24*60*60));
+              elsif l_expireTime is not null then
+                stex.expir_date := fix.utc_to_locl_time(l_expireTime);
+              end if;
+            -- GTC
+            when fix.c_time_in_force_gtc then
+              stex.stex_valid_constr_id := code_stex_valid_constr.gtc;
+            else null;  -- no further options are supported
+          end case;
+        end if;
+
+      end if;  -- mkt order type
+
+      ---- EXTERNAL REFERENCE ----
+      l_extl_ref_nr := fix_in.extl_ref_nr(
+        i_comp_id   => i_m.StandardMessageHeader.SenderCompID
+       ,i_cl_ord_id => i_m.OrderID
+      );
+      if l_do_debug then
+        fix.debug('External reference = ' || l_extl_ref_nr);
+      end if;
+
+      -- Unique identifier for order as assigned by sell-side
+      stex.extl_ref_nr := l_extl_ref_nr;
+
+      if fix_exe_rep_trade_in_css.do_ovr_compl_clt(i_m) then
+        ---- CUSTOMER SITE SPECIFIC OVERRIDE COMPLETE CLIENT ORDER ----
+        fix_exe_rep_trade_in_css.ovr_compl_clt(i_m, l_clt_idx);
+      end if;
+
+      ---- SET INTERNAL REFERENCE TO EXECUTION ID ----
+      stex.intl_ref_nr := l_exec_doc_id;
+
+      ---- ENABLE CALCULATION AND CALC ----
+      stex.do_calc := '+';
+      stex.calc_all;
+
+      assert(stex.macc_id is not null, 'stex.macc_id is not null');
+
+
+      ---- GET ORIGINAL CLIENT ORDER ID ----
+      l_orig_clt_doc_id := orig_clt_doc_id(i_m);
+
+      if l_orig_clt_doc_id is null then
+        l_pit_text := 'Trade reversal of trade with match id : ' || orig_trade_match_id(i_m);
+      else
+        l_pit_text := 'Trade reversal of order : ' || l_orig_clt_doc_id;
+
+        ---- SET REFERENCE TO ORIGINAL CLIENT ORDER ID ----
+        stex.ref_doc_id := l_orig_clt_doc_id;
+      end if;
+
+
+      ---- ADD POST-IT INDICATING ORIGINAL ORDER, SET INTERNAL REFERENCE ----
+      fix_in.add_postit(
+        doc           => stex
+       ,i_type_id     => fix.c_pit_type_info
+       ,i_sub_type_id => fix.c_pit_subtype_see_memo
+       ,i_topic       => 'Trade Reversal'
+       ,i_text        => l_pit_text
+      );
+
+      ---- FETCH ORDER IDENTIFIER ----
+      l_clt_doc_id := stex.doc_id;
+      if l_do_debug then
+        fix.debug('Completed client order with id ' || l_clt_doc_id);
+      end if;
+
+
+      ------------------------------------------------------------------------
+      -- PROCEED CLIENT ORDER
+      ------------------------------------------------------------------------
+      begin
+
+        ---- TRY TRANSITION TO STATUS 'TP: Ready for Execution' ----
+        stex.try_wfa(
+          wfa_id                 => fix.c_wfa_tp_proceed_id
+         ,err_wfa_id             => fix.c_wfa_tp_err_id
+         ,do_add_err_postit      => '+'
+         ,err_postit_type_id     => fix.c_pit_type_err
+         ,err_postit_sub_type_id => fix.c_pit_subtype_wfa_fail
+        );
+
+      exception
+        when others then
+          err.raise_fa(
+            'fix_exe_rep_trade_in.hdl_trade_revs'
+           ,'reason'          ,'failed proceed client order'
+           ,'msg_id'          ,i_m.head.msg_id
+           ,'wfa_id'          ,fix.c_wfa_tp_proceed_id
+           ,'err_wfa_id'      ,fix.c_wfa_tp_err_id
+           ,'l_clt_cont_id'   ,l_clt_cont_id
+          );
+      end;
+
+    end with;
+
+
+    --------------------------------------------------------------------------
+    -- CREATE EXECUTION GROUP WITH ONLY CLIENT ORDER AND EXECUTION IN MEMORY
+    -- Handle case one of the orders is in error status as follows:
+    -- Execute is done in any case.
+    -- For this purpose a catch all rule was added for exec#proceed.
+    -- Order in error status manually to be corrected.
+    -- Afterwards re-execute is done and everything should be fine.
+    --------------------------------------------------------------------------
+    begin
+
+      doc_stex.execute(
+        i_clt_doc_id  => l_clt_doc_id
+       ,i_exec_doc_id => l_exec_doc_id
+       ,i_do_reset    => false
+       ,i_do_mdf_grp  => true
+       ,i_do_commit   => false
+      );
+      if l_do_debug then
+        fix.debug('Created execution group with client order ' || l_clt_doc_id);
+      end if;
+
+    exception
+      when others then
+        err.raise_fa(
+          'fix_exe_rep_trade_in.hdl_trade_revs'
+         ,'reason' ,'failed creating execution group of client order and execution'
+         ,'msg_id' ,i_m.head.msg_id
+        );
+    end;
+
+    ---- LINK MESSAGE TO EXECUTION ----
+    i_m.head.doc_id := l_exec_doc_id;
+
+  exception
+    when others then
+      err.raise_fa(
+        'fix_exe_rep_trade_in.hdl_trade_revs'
+       ,'reason' ,session.log_mgr.last_log_msg
+       ,'msg_id' ,i_m.head.msg_id
+      );
+  end hdl_trade_revs;
+
+
+  ----------------------------------------------------------------------------
+  -- Handle unsolicited trade
+  -- Create both the execution and the client / market order
+  -- Field Account or PartyID for role ClientID defines container of client
+  -- order. Default container is taken if Account and PartyID are undefined.
+  -- If no container is found for given key, add post-it to client /market
+  -- order and transition to status 'TP: Order Error'.
+  ----------------------------------------------------------------------------
+  procedure hdl_unsol_trade(
+    i_m                       mem_msg_fix_exe_rep
+   ,i_asset_id                id obj_asset := null
+   ,i_aggr_key                text         := null
+  )
+  is
+    -- Flag indicating whether order has error
+    l_has_err_macc            boolean := false;
+    l_has_err_cont            boolean := false;
+
+    -- Identifier of post-it subtype
+    l_pit_subtype_id          id code_postit_sub_type;
+
+    -- Identifier of client / market order, execution
+    l_clt_doc_id              id doc_stex;
+    l_exec_doc_id             id doc_stex;
+
+    -- Index of client / market order, execution in memory
+    l_clt_idx                 id mem_doc_stex;
+    l_exec_idx                id mem_doc_stex;
+
+    -- Identifier of container of client order
+    l_clt_cont_id             id obj_cont;
+
+    -- Order role
+    l_doc_role_id             id table code_doc_role;
+
+    -- Party identifier of client
+    l_clt_party_id            text;
+
+    -- External reference of order
+    l_extl_ref_nr             text;
+
+    -- Post-it text
+    l_pit_text_inv_cont       text;
+    l_pit_text_inv_macc       text;
+    l_pit_text_miss_macc      text;
+
+    -- Order type of client order.
+    l_clt_ot_id               number;
+
+    -- Local caches
+    l_account                 text;
+    l_price                   number;
+    l_stopPx                  number;
+    l_timeInForce             text;
+    l_expireTime              text;
+    l_expireDate              date;
+
+    -- Debug flag
+    l_do_debug                boolean := fix.c_do_debug;
+  begin
+
+    if i_m is null then
+      require(false, 'i_m is not null');
+    end if;
+
+    if l_do_debug then
+      fix.set_debug_hdr('FIX_EXE_REP_TRADE_IN.HDL_UNSOL_TRADE');
+    end if;
+
+    --------------------------------------------------------------------------
+    -- GENERATE EXECUTION
+    --------------------------------------------------------------------------
+    l_exec_doc_id := gen_exec(
+      i_m        => i_m
+     ,i_asset_id => i_asset_id
+     ,i_aggr_key => i_aggr_key
+    );
+    assert(l_exec_doc_id is not null, 'l_exec_doc_id is not null');
+    if l_do_debug then
+      fix.debug('Created execution with id ' || l_exec_doc_id);
+    end if;
+
+
+    --------------------------------------------------------------------------
+    -- DETERMINE CLIENT CONTAINER FOR CUSTOMER / NOSTRO TRADING
+    --------------------------------------------------------------------------
+
+    -- PartyID for role 'Client ID' may contain symbolic key of container
+    with i_m.PartiesList as i_m_PartiesList do
+
+      if i_m_PartiesList.NoPartyIDs is not null then
+        for pg in i_m_PartiesList.PartiesGroup loop
+          if pg.PartyRole = fix.c_party_role_clt_id then
+            -- Identifier of client
+            l_clt_party_id := pg.PartyID;
+            exit;
+          end if;
+        end loop;
+      end if;
+
+    end with;
+
+    l_account := i_m.Account;
+    if l_account is null and l_clt_party_id is null then
+      -- Get default container for either customer or nostro trading
+      l_clt_cont_id := fix_in.dflt_clt_cont(i_m.CustOrderCapacity);
+
+    elsif l_account is not null then
+      -- Determine client container for account provided
+      l_clt_cont_id := fix_in.cont_from_key(l_account);
+    end if;
+
+    if l_clt_cont_id is null and l_clt_party_id is not null then
+      -- Determine client container for client party role
+      l_clt_cont_id := fix_in.cont_id(
+        i_m          => i_m
+       ,i_party_role => fix.c_party_role_clt_id
+      );
+    end if;
+
+    if l_clt_cont_id is null then
+      -- Unknown client container, take default container instead
+      l_clt_cont_id := fix.c_dflt_cont_id;
+      l_pit_text_inv_cont := 'No container found for account ' || l_account || ' or party id ' || l_clt_party_id;
+      l_has_err_cont := true;
+    end if;
+    assert(l_clt_cont_id is not null, 'l_clt_cont_id is not null');
+
+
+    --------------------------------------------------------------------------
+    -- EVALUATE TO GENERATE CLIENT OR MARKET ORDER
+    --------------------------------------------------------------------------
+    if fix_exe_rep_trade_in_css.do_gen_mkt_doc(i_m => i_m) then
+      l_doc_role_id := fix.c_role_stex_mkt_order;
+      if l_do_debug then
+        fix.debug('Open market order for given execution');
+      end if;
+    else
+      l_doc_role_id := fix.c_role_stex_clt_order;
+      if l_do_debug then
+        fix.debug('Open client order for given execution');
+      end if;
+    end if;
+
+
+    --------------------------------------------------------------------------
+    -- OVERRIDE PARAMETERS TO GENERATE STEX CLIENT / MARKET ORDER
+    --------------------------------------------------------------------------
+    if fix_exe_rep_trade_in_css.do_ovr_prep_clt(i_m) then
+      begin
+
+        ---- CUSTOMER SITE SPECIFIC OVERRIDE FOR MARKET ORDER PREPARATION ----
+        -- Create and populate memory table with order attributes
+        with new mem_tab(null) as tab do
+
+          ---- CREATE MEMORY TABLE ----
+
+          -- Add column for container identifier, related error flag
+          tab.cols.add_id(fix.c_col_name_cont_id, "obj_cont");
+          tab.cols.add_base(fix.c_col_name_cont_err, "boolean");
+
+
+          ---- POPULATE MEMORY TABLE ----
+          with new tab.row_list as row do
+
+            -- Populate object identifier of asset, business partner, ...
+            row.fld(fix.c_col_name_cont_id ).id_val := l_clt_cont_id;
+
+            -- Populate boolean fields i.e. error flags
+            row.fld(fix.c_col_name_cont_err ).bool_val := iff(l_has_err_cont , '+', '-');
+
+
+            fix.debug('ORDER ATTR : '
+              || ', cont = '  || l_clt_cont_id  || iff(l_has_err_cont,  ' has err', '')
+              || ', ot = '    || l_clt_ot_id
+            );
+
+
+            ---- CUSTOMER SITE SPECIFIC OVERRIDE ORDER ATTRIBUTES ----
+            fix_exe_rep_trade_in_css.ovr_prep_clt(i_m, tab);
+
+
+            ---- UPDATE LOCAL VARIABLES, LOG UPDATED ATTRIBUTES ----
+            -- Update error flags
+            l_has_err_cont  := nvl(row.fld(fix.c_col_name_cont_err).bool_val , '+') = '+';
+
+            ---- CONTAINER ----
+            if not equal.nr(l_clt_cont_id, row.fld(fix.c_col_name_cont_id).id_val) then
+              l_clt_cont_id := row.fld(fix.c_col_name_cont_id).id_val;
+            end if;
+
+          end with;
+
+        end with;
+
+        ---- UPDATE POST-IT IF REQUIRED ----
+        if l_has_err_cont then
+          if l_pit_text_inv_cont is null then
+            -- Unknown container, take default container instead, add post-it
+            l_clt_cont_id := fix.c_dflt_cont_id;
+            l_pit_text_inv_cont := 'No business partner found for ' || cntprty_det(i_m);
+          end if;
+        else
+          -- Valid container, clear post-it text
+          l_pit_text_inv_cont := null;
+        end if;
+
+      exception
+        when others then
+          err.raise_fa(
+            'fix_exe_rep_trade_in.gen_exec'
+           ,'reason'         ,'failed overriding order parameters'
+           ,'msg_id'         ,i_m.head.msg_id
+           ,'l_cont_id'      ,l_clt_cont_id
+           ,'l_clt_ot_id'    ,l_clt_ot_id
+          );
+      end;
+    end if;
+
+
+    --------------------------------------------------------------------------
+    -- GENERATE CLIENT / MARKET ORDER FOR GIVEN EXECUTION
+    --------------------------------------------------------------------------
+    l_clt_idx := doc_stex.exec#gen_clt (
+      i_exec_doc_id        => l_exec_doc_id
+     ,i_clt_cont_id        => l_clt_cont_id
+     ,i_clt_open_action_id => fix.c_wfa_zero_open_tp_order_id
+     ,i_doc_role_id        => l_doc_role_id
+     ,i_do_reset           => false
+    );
+    if l_do_debug then
+      fix.debug('Opened client / market order for given execution');
+    end if;
+
+
+    --------------------------------------------------------------------------
+    -- COMPLETE CLIENT / MARKET ORDER
+    --------------------------------------------------------------------------
+    with mem_doc_stex(l_clt_idx) as stex do
+
+      -- With the new handling first the exec type must be set manually and only afterwards
+      -- it is possible to set the fields like limit
+
+      if avq$base_par_doc_stex.enbl_mkt_order_type = '+' then
+        ---- EXECUTION TYPE ----
+        if i_m.MaxFloor is not null then
+          stex.exec_type_id := code_order_sub_type.ice;
+        else
+          case i_m.OrdType
+            when fix.c_ord_type_mkt          then stex.exec_type_id := code_order_sub_type.mkt;
+            when fix.c_ord_type_limit        then stex.exec_type_id := code_order_sub_type.lim;
+            when fix.c_ord_type_stop         then stex.exec_type_id := code_order_sub_type.stop_mkt;
+            when fix.c_ord_type_stop_limit   then stex.exec_type_id := code_order_sub_type.stop_limit;
+            when fix.c_ord_type_mkt_to_limit then stex.exec_type_id := code_order_sub_type.mkt_to_limit;
+            else                                  stex.exec_type_id := code_order_sub_type.unkn;
+          end case;
+        end if;
+      end if;
+
+      ---- DISABLE CALCULATION ----
+      stex.do_calc := '-';
+
+      ---- QUANTITY ----
+      stex.qty := i_m.CumQty + i_m.LeavesQty;
+      if stex.qty is null then
+        assert(false, 'stex.qty is not null');
+      end if;
+
+      ---- LIMIT ----
+      l_price := i_m.Price;
+      if coalesce(l_price, 0) != 0 then
+        stex.limit := l_price;
+      end if;
+
+      ---- TRIGGER PRICE ----
+      l_stopPx := i_m.StopPx;
+      if coalesce(l_stopPx, 0) != 0 then
+        stex.trig_price := l_stopPx;
+      end if;
+
+      ---- EXPIRATION DATE ----
+      l_timeInForce := i_m.TimeInForce;
+      l_expireTime := i_m.ExpireTime;
+      l_expireDate := i_m.ExpireDate;
+
+      -- NON MARKET ORDER TYPE --
+      if not (avq$base_par_doc_stex.enbl_mkt_order_type = '+') then
+        if   l_timeInForce is null
+          or l_timeInForce = fix.c_time_in_force_day
+        then
+          -- Day order, expiration just before midnight
+          stex.expir_date := session.today + (1-1/(24*60*60));
+
+        elsif l_timeInForce is not null
+          and l_timeInForce = fix.c_time_in_force_date
+        then
+          if l_expireTime is null and l_expireDate is not null then
+            stex.expir_date := l_expireDate + (1-1/(24*60*60));
+          elsif l_expireTime is not null then
+            stex.expir_date := fix.utc_to_locl_time(l_expireTime);
+          end if;
+        end if;
+
+      -- MARKET ORDER TYPE --
+      else
+        case l_timeInForce
+          -- GFD
+          when fix.c_time_in_force_day then
+            stex.stex_valid_constr_id := code_stex_valid_constr.gfd;
+          -- GTD
+          when fix.c_time_in_force_date then
+            stex.stex_valid_constr_id := code_stex_valid_constr.gtd;
+            if l_expireTime is null and l_expireDate is not null then
+              stex.expir_date := l_expireDate + (1-1/(24*60*60));
+            elsif l_expireTime is not null then
+              stex.expir_date := fix.utc_to_locl_time(l_expireTime);
+            end if;
+          -- GTC
+          when fix.c_time_in_force_gtc then
+            stex.stex_valid_constr_id := code_stex_valid_constr.gtc;
+          else null;  -- no further options are supported
+        end case;
+
+      end if;  -- mkt order type
+
+      ---- EXTERNAL REFERENCE ----
+      l_extl_ref_nr := fix_in.extl_ref_nr(
+        i_comp_id   => i_m.StandardMessageHeader.SenderCompID
+       ,i_cl_ord_id => i_m.OrderID
+      );
+      if l_do_debug then
+        fix.debug('External reference = ' || l_extl_ref_nr);
+      end if;
+
+      -- Unique identifier for order as assigned by sell-side
+      stex.extl_ref_nr := l_extl_ref_nr;
+
+      if fix_exe_rep_trade_in_css.do_ovr_compl_clt(i_m) then
+        ---- CUSTOMER SITE SPECIFIC OVERRIDE COMPLETE CLIENT ORDER ----
+        fix_exe_rep_trade_in_css.ovr_compl_clt(i_m, l_clt_idx);
+      end if;
+
+      ---- SET INTERNAL REFERENCE TO EXECUTION ID ----
+      stex.intl_ref_nr := l_exec_doc_id;
+
+      ---- ENABLE CALCULATION AND CALC ----
+      stex.do_calc := '+';
+      stex.calc_all;
+
+
+      ---- HANDLE CASE MONEY ACCOUNT IS UNDEFINED OR INVALID ----
+      if    stex.macc_id is null
+        and stex.cont_id is not null
+      then
+        -- Missing money account, take default container
+        l_clt_cont_id := fix.c_dflt_cont_id;
+        l_pit_text_miss_macc := 'Money account missing for container ' ||
+          stex.cont_id || ' and currency ' || stex.trade_curry.extn.asset_iso;
+        l_has_err_cont := true;
+
+        -- Update container of order
+        stex.cont_id := l_clt_cont_id;
+
+      elsif stex.macc_id is not null
+        and (stex.macc.close_date <= session.today
+          or stex.macc.open_date  >  session.today)
+      then
+        -- Invalid money account, take default container
+        l_clt_cont_id := fix.c_dflt_cont_id;
+        l_pit_text_inv_macc := 'Invalid money account ' || stex.macc_id || ' for container '
+          || stex.cont_id || ' and currency ' || stex.trade_curry.extn.asset_iso;
+        l_has_err_macc := true;
+
+        -- Update container of order
+        stex.cont_id := l_clt_cont_id;
+      end if;
+
+      assert(stex.macc_id is not null, 'stex.macc_id is not null');
+
+      ---- ADD POST-IT IN CASE OF ERROR, SET INTERNAL REFERENCE ----
+      if l_has_err_macc or l_has_err_cont then
+
+        if l_pit_text_inv_cont is not null then
+          if l_do_debug then
+            fix.debug('Add post-it invalid container');
+          end if;
+          fix_in.add_postit(
+            doc           => stex
+           ,i_type_id     => fix.c_pit_type_err
+           ,i_sub_type_id => fix.c_pit_subtype_inv_cont
+           ,i_topic       => fix.c_pit_topic_inv_cont
+           ,i_text        => l_pit_text_inv_cont
+          );
+        end if;
+
+        if l_pit_text_miss_macc is not null then
+          if l_do_debug then
+            fix.debug('Add post-it missing money account');
+          end if;
+          fix_in.add_postit(
+            doc           => stex
+           ,i_type_id     => fix.c_pit_type_err
+           ,i_sub_type_id => fix.c_pit_subtype_miss_macc
+           ,i_topic       => fix.c_pit_topic_miss_macc
+           ,i_text        => l_pit_text_miss_macc
+          );
+        end if;
+
+        if l_pit_text_inv_macc is not null then
+          if l_do_debug then
+            fix.debug('Add post-it invalid money account');
+          end if;
+          fix_in.add_postit(
+            doc           => stex
+           ,i_type_id     => fix.c_pit_type_err
+           ,i_sub_type_id => fix.c_pit_subtype_inv_macc
+           ,i_topic       => fix.c_pit_topic_inv_macc
+           ,i_text        => l_pit_text_inv_macc
+          );
+        end if;
+
+      end if;
+
+      ---- FETCH ORDER IDENTIFIER ----
+      l_clt_doc_id := stex.doc_id;
+      if l_do_debug then
+        fix.debug('Completed client / market order with id ' || l_clt_doc_id);
+      end if;
+
+
+      ------------------------------------------------------------------------
+      -- PROCEED CLIENT / MARKET ORDER
+      ------------------------------------------------------------------------
+      begin
+        if l_has_err_macc or l_has_err_cont then
+
+          ---- TRANSITION TO STATUS 'TP: Order Error' ----
+          stex.do_wfc_action(
+            wfc_action_id => fix.c_wfa_tp_err_id
+           ,no_commit     => '+'
+          );
+
+        else
+
+          ---- TRY TRANSITION TO STATUS 'TP: Ready for Execution' ----
+          stex.try_wfa(
+            wfa_id                 => fix.c_wfa_tp_proceed_id
+           ,err_wfa_id             => fix.c_wfa_tp_err_id
+           ,do_add_err_postit      => '+'
+           ,err_postit_type_id     => fix.c_pit_type_err
+           ,err_postit_sub_type_id => fix.c_pit_subtype_wfa_fail
+          );
+
+        end if;
+      exception
+        when others then
+          err.raise_fa(
+            'fix_exe_rep_trade_in.hdl_unsol_trade'
+           ,'reason'          ,'failed proceed client / market order'
+           ,'msg_id'          ,i_m.head.msg_id
+           ,'wfa_id'          ,fix.c_wfa_tp_proceed_id
+           ,'err_wfa_id'      ,fix.c_wfa_tp_err_id
+           ,'l_clt_cont_id'   ,l_clt_cont_id
+           ,'l_doc_role_id'   ,l_doc_role_id
+          );
+      end;
+
+    end with;
+
+
+    --------------------------------------------------------------------------
+    -- CREATE EXECUTION GROUP WITH ONLY CLIENT / MARKET ORDER AND EXECUTION IN
+    -- MEMORY
+    -- Handle case one of the orders is in error status as follows:
+    -- Execute is done in any case.
+    -- For this purpose a catch all rule was added for exec#proceed.
+    -- Order in error status manually to be corrected.
+    -- Afterwards re-execute is done and everything should be fine.
+    --------------------------------------------------------------------------
+    begin
+
+      doc_stex.execute(
+        i_clt_doc_id  => l_clt_doc_id
+       ,i_exec_doc_id => l_exec_doc_id
+       ,i_do_reset    => false
+       ,i_do_mdf_grp  => true
+       ,i_do_commit   => false
+      );
+      if l_do_debug then
+        fix.debug('Created execution group with client / market order ' || l_clt_doc_id);
+      end if;
+    exception
+      when others then
+        err.raise_fa(
+          'fix_exe_rep_trade_in.hdl_unsol_trade'
+         ,'reason'      ,'failed creating execution group of client / market order and execution'
+         ,'msg_id'      ,i_m.head.msg_id
+         ,'doc_role_id' ,l_doc_role_id
+        );
+    end;
+
+    ---- LINK MESSAGE TO EXECUTION ----
+    i_m.head.doc_id := l_exec_doc_id;
+
+  exception
+    when others then
+      err.raise_fa(
+        'fix_exe_rep_trade_in.hdl_unsol_trade'
+       ,'reason'      ,session.log_mgr.last_log_msg
+       ,'msg_id'      ,i_m.head.msg_id
+       ,'doc_role_id' ,l_doc_role_id
+      );
+  end hdl_unsol_trade;
+
+end fix_exe_rep_trade_in;

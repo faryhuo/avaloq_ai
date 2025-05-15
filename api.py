@@ -11,8 +11,12 @@ import time
 from pathlib import Path
 import pdfplumber
 import sys
+from file_manager_api import file_manager
 
 app = Flask(__name__)
+# Register the file manager blueprint
+app.register_blueprint(file_manager)
+
 api = Api(
     app,
     version='1.0',
@@ -161,7 +165,6 @@ class FileComparer(Resource):
         file1_content = data.get('file1_content', '')
         file2_content = data.get('file2_content', '')
         file1_name = data.get('file1_name', '')
-        file2_name = data.get('file2_name', '')
                 
         try:
             # If content is provided directly, use it
@@ -259,27 +262,40 @@ class DiffViewer(Resource):
 @ns.route('/doc/<string:filename>')
 class PdfToTextReader(Resource):
     @ns.doc('pdf_to_text',
-            params={'filename': 'Name of the PDF file to convert'},
+            params={'filename': 'Name of the file to convert'},
             responses={
                 200: 'Success',
-                400: 'Invalid file name or not a PDF',
+                400: 'Invalid file name',
                 404: 'File not found',
-                500: 'PDF to text conversion error'
+                500: 'File conversion error'
             })
     def get(self, filename):
-        """Convert a PDF file to text and return its content"""
-        if not filename or not filename.lower().endswith('.pdf'):
-            return jsonify({'content': '', 'filename': filename, 'status': 'Error: Invalid file name or not a PDF'}), 400
-        pdf_path = os.path.join('doc', filename)
-        if not os.path.exists(pdf_path):
+        """Convert a PDF file to text or read other file types directly"""
+        if not filename:
+            return jsonify({'content': '', 'filename': filename, 'status': 'Error: Invalid file name'}), 400
+            
+        file_path = os.path.join('doc', filename)
+        if not os.path.exists(file_path):
             return jsonify({'content': '', 'filename': filename, 'status': 'Error: File not found'}), 404
+            
         try:
-            with pdfplumber.open(pdf_path) as pdf:
-                all_text = ""
-                for page in pdf.pages:
-                    all_text += page.extract_text() or ""
-                    all_text += "\n"
-            return jsonify({'content': all_text, 'filename': filename, 'status': 'Success'})
+            # If it's not a PDF file, read it directly
+            if not filename.lower().endswith('.pdf'):
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+            else:
+                # Handle PDF files
+                with pdfplumber.open(file_path) as pdf:
+                    content = ""
+                    for page in pdf.pages:
+                        content += page.extract_text() or ""
+                        content += "\n"
+                        
+            return jsonify({
+                'content': content,
+                'filename': filename,
+                'status': 'Success'
+            })
         except Exception as e:
             return jsonify({'content': '', 'filename': filename, 'status': f'Error: {str(e)}'}), 500
 
@@ -288,18 +304,24 @@ def pdf_to_text(pdf_path, txt_path=None):
         print(f"File not found: {pdf_path}")
         return
 
-    with pdfplumber.open(pdf_path) as pdf:
-        all_text = ""
-        for page in pdf.pages:
-            all_text += page.extract_text() or ""
-            all_text += "\n"
+    # If the file is a markdown file, read it directly
+    if not pdf_path.lower().endswith('.pdf'):
+        with open(pdf_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+    else:
+        # Handle PDF files as before
+        with pdfplumber.open(pdf_path) as pdf:
+            content = ""
+            for page in pdf.pages:
+                content += page.extract_text() or ""
+                content += "\n"
 
     if txt_path:
         with open(txt_path, "w", encoding="utf-8") as f:
-            f.write(all_text)
+            f.write(content)
         print(f"Text saved to {txt_path}")
     else:
-        print(all_text)
+        print(content)
 
 @ns.route('/write')
 class FileWriter(Resource):
@@ -343,6 +365,11 @@ class FileWriter(Resource):
 
         except Exception as e:
             return jsonify({'status': f'Error: {str(e)}'}), 500
+
+@app.route('/file-manager')
+def file_manager_ui():
+    """Render the file manager UI"""
+    return render_template('file_manager.html')
 
 if __name__ == '__main__':
     # Create files directory if it doesn't exist

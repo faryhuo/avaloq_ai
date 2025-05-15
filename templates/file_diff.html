@@ -126,7 +126,7 @@
         }
 
         .highlight {
-            background-color: #ffeb3b;
+            background-color: #3bff4b;
             padding: 2px 0;
         }
 
@@ -157,7 +157,7 @@
 <body>
     <div class="diff-container">
         <div class="diff-header">
-            <h2>Source Comparison</h2>
+            <h2>Source Comparison : <span class="highlight">{% if file1_name.endswith('.txt') %}{{ file1_name[:-4] }}{% else %}{{ file1_name }}{% endif %}</span></h2>
             <button id="toggle-diff-btn" onclick="toggleDiff()">Show diff only</button>
         </div>
         <div class="diff-content">

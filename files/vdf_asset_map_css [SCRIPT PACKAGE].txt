@@ -1,0 +1,42 @@
+[Script 1.0]
+extension script package vdf_asset_map_css
+is
+
+  ----------------------------------------------------------------------------
+  -- IMPORTS
+  ----------------------------------------------------------------------------
+  ---- NATIVE ----
+  import native s#df_util;
+
+  ---- AVALOQ ----
+  import err;
+  import vdf_tab;
+  import vdf_util_publ;
+
+  ----------------------------------------------------------------------------
+  -- CUSTOMER OVERRIDES
+  ----------------------------------------------------------------------------
+
+  ----------------------------------------------------------------------------
+  function has_name(
+    i_dflt_val                                    boolean
+   ,i_doc                                         mem_doc_asset := null
+   ,i_df_grp_id                                   number        := null
+   ,i_df_grp_instn_id                             number        := null
+  ) return boolean
+  is
+  begin
+    case s#df_util.df_grp_instn#lang_id(i_df_grp_instn_id)
+      when code_lang.automatic then return true;
+      when code_lang.e         then return true;
+      when code_lang.g         then return true;
+      when code_lang.f         then return true;
+      when code_lang.i         then return true;
+      else return false;
+    end case;
+  exception
+    when others then
+      err.raise_fa('vdf_asset_map_css.has_name');
+  end has_name;
+
+end vdf_asset_map_css;

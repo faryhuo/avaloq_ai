@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>File Manager</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        .file-list {
+            max-height: 500px;
+            overflow-y: auto;
+        }
+        .file-item {
+            transition: background-color 0.2s;
+        }
+        .file-item:hover {
+            background-color: #f8f9fa;
+        }
+        .upload-area {
+            border: 2px dashed #ddd;
+            border-radius: 8px;
+            padding: 20px;
+            text-align: center;
+            cursor: pointer;
+            transition: border-color 0.2s;
+        }
+        .upload-area:hover {
+            border-color: #0d6efd;
+        }
+        .tab-content {
+            padding: 20px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container py-5">
+        <h1 class="mb-4">File Manager</h1>
+        
+        <ul class="nav nav-tabs" id="myTab" role="tablist">
+            <li class="nav-item" role="presentation">
+                <button class="nav-link active" id="files-tab" data-bs-toggle="tab" data-bs-target="#files" type="button" role="tab">Files</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="docs-tab" data-bs-toggle="tab" data-bs-target="#docs" type="button" role="tab">Documents</button>
+            </li>
+        </ul>
+        
+        <div class="tab-content" id="myTabContent">
+            <!-- Files Tab -->
+            <div class="tab-pane fade show active" id="files" role="tabpanel">
+                <div class="upload-area mb-4" id="filesUploadArea">
+                    <i class="fas fa-cloud-upload-alt fa-2x mb-2"></i>
+                    <p class="mb-0">Drag and drop files here or click to upload</p>
+                    <input type="file" id="filesInput" style="display: none" multiple>
+                </div>
+                <div class="file-list" id="filesList">
+                    <!-- Files will be listed here -->
+                </div>
+            </div>
+            
+            <!-- Docs Tab -->
+            <div class="tab-pane fade" id="docs" role="tabpanel">
+                <div class="upload-area mb-4" id="docsUploadArea">
+                    <i class="fas fa-cloud-upload-alt fa-2x mb-2"></i>
+                    <p class="mb-0">Drag and drop markdown files here or click to upload</p>
+                    <input type="file" id="docsInput" accept=".md" style="display: none" multiple>
+                </div>
+                <div class="file-list" id="docsList">
+                    <!-- Docs will be listed here -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        function formatFileSize(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        function formatDate(timestamp) {
+            return new Date(timestamp * 1000).toLocaleString();
+        }
+
+        function createFileElement(file, folder) {
+            const div = document.createElement('div');
+            div.className = 'file-item p-3 border-bottom d-flex justify-content-between align-items-center';
+            div.innerHTML = `
+                <div>
+                    <i class="fas fa-file me-2"></i>
+                    <span>${file.name}</span>
+                </div>
+                <div>
+                    <span class="me-3">${formatFileSize(file.size)}</span>
+                    <span class="me-3">${formatDate(file.modified)}</span>
+                    <button class="btn btn-sm btn-primary me-2" onclick="downloadFile('${folder}', '${file.name}')">
+                        <i class="fas fa-download"></i>
+                    </button>
+                    <button class="btn btn-sm btn-danger" onclick="deleteFile('${folder}', '${file.name}')">
+                        <i class="fas fa-trash"></i>
+                    </button>
+                </div>
+            `;
+            return div;
+        }
+
+        async function loadFiles() {
+            try {
+                const response = await fetch('/api/files');
+                const files = await response.json();
+                const filesList = document.getElementById('filesList');
+                filesList.innerHTML = '';
+                files.forEach(file => {
+                    filesList.appendChild(createFileElement(file, 'files'));
+                });
+            } catch (error) {
+                console.error('Error loading files:', error);
+            }
+        }
+
+        async function loadDocs() {
+            try {
+                const response = await fetch('/api/docs');
+                const docs = await response.json();
+                const docsList = document.getElementById('docsList');
+                docsList.innerHTML = '';
+                docs.forEach(doc => {
+                    docsList.appendChild(createFileElement(doc, 'doc'));
+                });
+            } catch (error) {
+                console.error('Error loading docs:', error);
+            }
+        }
+
+        async function uploadFile(file, folder) {
+            const formData = new FormData();
+            formData.append('file', file);
+            
+            try {
+                const response = await fetch(`/api/upload/${folder}`, {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.error);
+                }
+                
+                if (folder === 'files') {
+                    loadFiles();
+                } else {
+                    loadDocs();
+                }
+            } catch (error) {
+                alert('Upload failed: ' + error.message);
+            }
+        }
+
+        async function deleteFile(folder, filename) {
+            if (!confirm('Are you sure you want to delete this file?')) return;
+            
+            try {
+                const response = await fetch(`/api/delete/${folder}/${filename}`, {
+                    method: 'DELETE'
+                });
+                
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.error);
+                }
+                
+                if (folder === 'files') {
+                    loadFiles();
+                } else {
+                    loadDocs();
+                }
+            } catch (error) {
+                alert('Delete failed: ' + error.message);
+            }
+        }
+
+        function downloadFile(folder, filename) {
+            window.location.href = `/api/download/${folder}/${filename}`;
+        }
+
+        // Setup upload areas
+        ['files', 'docs'].forEach(area => {
+            const uploadArea = document.getElementById(`${area}UploadArea`);
+            const input = document.getElementById(`${area}Input`);
+            
+            uploadArea.addEventListener('click', () => input.click());
+            
+            uploadArea.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                uploadArea.style.borderColor = '#0d6efd';
+            });
+            
+            uploadArea.addEventListener('dragleave', () => {
+                uploadArea.style.borderColor = '#ddd';
+            });
+            
+            uploadArea.addEventListener('drop', (e) => {
+                e.preventDefault();
+                uploadArea.style.borderColor = '#ddd';
+                const files = e.dataTransfer.files;
+                Array.from(files).forEach(file => {
+                    uploadFile(file, area === 'files' ? 'files' : 'doc');
+                });
+            });
+            
+            input.addEventListener('change', () => {
+                Array.from(input.files).forEach(file => {
+                    uploadFile(file, area === 'files' ? 'files' : 'doc');
+                });
+            });
+        });
+
+        // Initial load
+        loadFiles();
+        loadDocs();
+    </script>
+</body>
+</html> 

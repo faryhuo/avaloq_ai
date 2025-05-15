@@ -1,0 +1,399 @@
+[Script 1.0]
+
+script package euxn_del_ord_bcst_in
+
+  ----------------------------------------------------------------------------
+  -- DESCRIPTION
+  -- Incoming message handler for Execution Report Broadcast - Deletion
+  --
+  -- Use Case
+  -- - Cancellation of Order accepted by trading system
+  --   Trading system provides cancellation details, containing amongst
+  --   others the original, executed and open quantity of the order.
+  --
+  -- There are different cases to handle:
+  -- - Open quantity at trading system equals total quantity of order
+  --   Order can be discarded.
+  --
+  -- - Open quantity at trading system less than open quantity of order
+  --   We need to wait for the missing Trade Confirmation message
+  --   and requeue this Execution Report - Deletion message.
+  --
+  -- Otherwise the order is partially executed and can be reduced.
+  --
+  -- Processing of the message is as follows:
+  --  Get incoming EUXN.EXE_REP_BCST.NEW/MDF message for given external reference
+  --  Get market order linked to this message
+  --  Handle individual use case as described above
+  --  Finally update both the originating message and the deletion message,
+  --  link deletion message to the market order and set it to processed.
+  ----------------------------------------------------------------------------
+
+is
+
+  ----------------------------------------------------------------------------
+  -- AVALOQ SCRIPT IMPORTS
+  ----------------------------------------------------------------------------
+  ---- COMMON ----
+  import                     doc_stex;
+  import                     err;
+
+  ---- INTERFACE ----
+  import                     euxn_in;
+  import                     euxn_stex;
+  import                     euxn_del_ord_bcst_in_css;
+
+
+  ----------------------------------------------------------------------------
+  -- FUNCTIONS
+  ----------------------------------------------------------------------------
+
+  ----------------------------------------------------------------------------
+  -- Get identifier of market order linked to previously received message
+  -- Lookup incoming Execution Report Broadcast New or MDF
+  -- @param i_m incoming Delete Order message
+  -- @param i_eurex_key string key to contract
+  ----------------------------------------------------------------------------
+  function orig_msg_doc_id(
+    i_m                      mem_msg_euxn_del_ord_bcst
+   ,i_eurex_key              text
+  ) return id doc_stex
+  is
+
+    -- Identifier of market order
+    l_mkt_doc_id             id doc_stex;
+
+    -- External reference of original message
+    l_orig_msg_extl_ref_nr   text;
+
+  begin
+
+    euxn_stex.set_debug_hdr('EUXN_DEL_ORD_BCST_IN.ORIG_MSG_DOC_ID');
+
+    with i_m.DeleteOrderBroadcast.attr as i_m_DeleteOrderBroadcast_attr do
+
+      ---- GET EXTERNAL REFERENCE OF ORIGINAL MESSAGE ----
+      l_orig_msg_extl_ref_nr := 'L/'
+                             || trim(i_m_DeleteOrderBroadcast_attr.OrderID)
+                             || '/' || i_eurex_key
+                             || '/' || '%';
+
+      ---- GET ORDER LINKED TO RETRIEVED MESSAGE ----
+      l_mkt_doc_id := lookup.msg(
+        extl_ref_nr => l_orig_msg_extl_ref_nr
+       ,netw_id     => i_m.head.netw_id
+       ,dir         => 'i'
+      ).doc_id;
+
+      if euxn_stex.c_do_debug then
+        euxn_stex.debug('l_mkt_doc_id = ' || l_mkt_doc_id);
+      end if;
+
+      return l_mkt_doc_id;
+
+    end with;
+
+  exception
+    when others then
+      err.raise_fa(
+        'euxn_del_ord_bcst_in.orig_msg_doc_id'
+       ,'msg_id' ,i_m.head.msg_id
+      );
+  end orig_msg_doc_id;
+
+
+  ----------------------------------------------------------------------------
+  -- Get identifier of previously received message of order
+  -- Lookup incoming Execution Report Broadcast New or MDF
+  -- @param i_m incoming DEL message
+  -- @param i_eurex_key string key to contract
+  ----------------------------------------------------------------------------
+  function orig_msg_id(
+    i_m                      mem_msg_euxn_del_ord_bcst
+   ,i_eurex_key              text
+  ) return id msg
+  is
+
+    -- Identifier of originating message
+    l_orig_msg_id            id msg;
+
+    -- External reference of original message
+    l_orig_msg_extl_ref_nr   text;
+
+  begin
+
+    with i_m.DeleteOrderBroadcast.attr as i_m_DeleteOrderBroadcast_attr do
+
+      ---- GET EXTERNAL REFERENCE OF ORIGINAL MESSAGE ----
+      l_orig_msg_extl_ref_nr := 'L/'
+                             || trim(i_m_DeleteOrderBroadcast_attr.OrderID)
+                             || '/' || i_eurex_key
+                             || '/' || '%';
+
+      ---- GET MESSAGE FOR GIVEN ORIGINAL EXTERNAL REFERENCE ----
+      l_orig_msg_id := lookup.msg(
+        extl_ref_nr => l_orig_msg_extl_ref_nr
+       ,netw_id     => i_m.head.netw_id
+       ,dir         => 'i'
+      );
+
+      return l_orig_msg_id;
+
+    end with;
+
+  exception
+    when others then
+      err.raise_fa(
+        'euxn_del_ord_bcst_in.orig_msg_id'
+       ,'msg_id' ,i_m.head.msg_id
+      );
+  end orig_msg_id;
+
+
+  ---------------------------------------------------------------------------
+  -- PROCEDURES
+  ---------------------------------------------------------------------------
+
+  ----------------------------------------------------------------------------
+  -- Discard order
+  -- Order has no executions and can be discarded
+  ----------------------------------------------------------------------------
+  procedure discd_doc(
+    i_m                      mem_msg_euxn_del_ord_bcst
+   ,i_doc_idx                id mem_doc_stex
+  )
+  is
+  begin
+
+    if i_m is null or i_doc_idx is null then
+      require(false, 'i_m is not null and i_doc_idx is not null');
+    end if;
+
+    if euxn_stex.c_do_debug then
+      euxn_stex.set_debug_hdr('EUXN_DEL_ORD_BCST_IN.DISCD_DOC');
+    end if;
+
+    with mem_doc_stex(i_doc_idx) as stex do
+
+      if euxn_del_ord_bcst_in_css.do_ovr_compl_clt(i_m) then
+        ---- CUSTOMER SITE SPECIFIC OVERRIDE COMPLETE CLIENT ORDER ----
+        euxn_del_ord_bcst_in_css.ovr_compl_clt(i_m, i_doc_idx);
+      end if;
+
+      ---- TRY DISCARD WORKFLOW ACTION ----
+      stex.try_wfa(
+        wfa_id                 => euxn_stex.c_wfa_generic_del_id
+       ,err_wfa_id             => euxn_stex.c_wfa_tp_err_id
+       ,do_add_err_postit      => '+'
+       ,err_postit_type_id     => code_postit_type.error
+       ,err_postit_sub_type_id => code_postit_sub_type.stex_wfa_fail
+      );
+
+    end with;
+
+    if euxn_stex.c_do_debug then
+      euxn_stex.debug('Tried discarding order');
+    end if;
+
+  exception
+    when others then
+      err.raise_fa(
+        'euxn_del_ord_bcst_in.discd_doc'
+       ,'reason'     ,'failed discard order'
+       ,'msg_id'     ,i_m.head.msg_id
+       ,'wfa_id'     ,euxn_stex.c_wfa_generic_del_id
+       ,'err_wfa_id' ,euxn_stex.c_wfa_tp_err_id
+      );
+  end discd_doc;
+
+
+  ----------------------------------------------------------------------------
+  -- Handle consistency failure
+  -- Open quantity at trading system is bigger than the open quantity in avaloq.
+  -- Either manually an execution has been created or something has gone
+  -- wrong. Add post-it to order, transition to error status
+  ----------------------------------------------------------------------------
+  procedure hdl_csy_fail(
+    i_m                      mem_msg_euxn_del_ord_bcst
+   ,i_doc_idx                id mem_doc_stex
+  )
+  is
+
+    -- Cancelled (prior open) quantity of order at trading system
+    l_sys_canc_qty           number;
+
+    -- Original, current, executed and open quantity of market order
+    l_mkt_curr_qty           number;
+    l_mkt_exec_qty           number;
+    l_mkt_opn_qty            number;
+
+    -- Post-it text
+    l_pit_text               text;
+
+  begin
+
+    with i_m.DeleteOrderBroadcast.attr as i_m_DeleteOrderBroadcast_attr do
+
+      if i_m is null or i_doc_idx is null then
+        require(false, 'i_m is not null and i_doc_idx is not null');
+      end if;
+
+      euxn_stex.set_debug_hdr('EUXN_DEL_ORD_BCST_IN.HDL_CSY_FAIL');
+
+      -- Fetch cancelled quantitiy provided by trading system
+      l_sys_canc_qty := nvl(i_m_DeleteOrderBroadcast_attr.CxlQty, 0);
+
+      with mem_doc_stex(i_doc_idx) as stex do
+
+        -- Fetch quantities of client/market order
+        l_mkt_curr_qty := abs(stex.qty);
+        if l_mkt_curr_qty  < stex.exec_link_executed_qty then
+          l_mkt_opn_qty  := l_mkt_curr_qty - stex.exec_link_executed_qty;
+        end if;
+
+        l_pit_text := 'Open/cancelled quantity at trading system ('
+          || l_sys_canc_qty || ') is greater than open quantity ('
+          || l_mkt_opn_qty  || ') in Avaloq. Please check cause of this inconsistency.';
+
+        ---- ADD POST-IT ----
+        euxn_in.add_postit(
+          i_doc         => stex
+         ,i_type_id     => code_postit_type.warning
+         ,i_sub_type_id => code_postit_sub_type.stex_tp_csy_fail
+         ,i_topic       => euxn_stex.c_pit_topic_tp_csy_fail
+         ,i_text        => l_pit_text
+        );
+
+        ---- TRANSITION TO STATUS 'TP: Order Error' ----
+        stex.do_wfc_action(
+          wfc_action_id => euxn_stex.c_wfa_tp_err_id
+         ,no_commit     => '+'
+        );
+
+      end with;
+
+    end with;
+
+  exception
+    when others then
+      err.raise_fa(
+        'euxn_del_ord_bcst_in.hdl_csy_fail'
+       ,'reason'     ,'failed transition to error status'
+       ,'msg_id'     ,i_m.head.msg_id
+       ,'wfa_id'     ,euxn_stex.c_wfa_tp_err_id
+      );
+  end hdl_csy_fail;
+
+
+  ----------------------------------------------------------------------------
+  -- Proceed order
+  -- Order has executions and is fully executed; to be proceeded
+  ----------------------------------------------------------------------------
+  procedure proceed_doc(
+    i_m                      mem_msg_euxn_del_ord_bcst
+   ,i_doc_idx                id mem_doc_stex
+  )
+  is
+  begin
+
+    if i_m is null or i_doc_idx is null then
+      require(false, 'i_m is not null and i_doc_idx is not null');
+    end if;
+
+    if euxn_stex.c_do_debug then
+      euxn_stex.set_debug_hdr('EUXN_DEL_ORD_BCST_IN.PROCEED_DOC');
+    end if;
+
+    with mem_doc_stex(i_doc_idx) as stex do
+
+      if euxn_del_ord_bcst_in_css.do_ovr_compl_clt(i_m) then
+        ---- CUSTOMER SITE SPECIFIC OVERRIDE COMPLETE CLIENT ORDER ----
+        euxn_del_ord_bcst_in_css.ovr_compl_clt(i_m, i_doc_idx);
+      end if;
+
+      ---- TRY DISCARD WORKFLOW ACTION ----
+      stex.try_wfa(
+        wfa_id                 => euxn_stex.c_wfa_tp_proceed_id
+       ,err_wfa_id             => euxn_stex.c_wfa_tp_err_id
+       ,do_add_err_postit      => '+'
+       ,err_postit_type_id     => code_postit_type.error
+       ,err_postit_sub_type_id => code_postit_sub_type.stex_wfa_fail
+      );
+
+    end with;
+
+    if euxn_stex.c_do_debug then
+      euxn_stex.debug('Tried proceeding order');
+    end if;
+
+  exception
+    when others then
+      err.raise_fa(
+        'euxn_del_ord_bcst_in.proceed_doc'
+       ,'reason'     ,'failed discard order'
+       ,'msg_id'     ,i_m.head.msg_id
+       ,'wfa_id'     ,euxn_stex.c_wfa_generic_del_id
+       ,'err_wfa_id' ,euxn_stex.c_wfa_tp_err_id
+      );
+  end proceed_doc;
+
+
+  ----------------------------------------------------------------------------
+  -- Reduce order
+  -- Order is partially executed and can be reduced
+  ----------------------------------------------------------------------------
+  procedure reduce_doc(
+    i_m                      mem_msg_euxn_del_ord_bcst
+   ,i_doc_idx                id mem_doc_stex
+  )
+  is
+
+    -- Identifier of client order
+    l_clt_doc_id             id doc_stex;
+
+  begin
+
+    if i_m is null or i_doc_idx is null then
+      require(false, 'i_m is not null and i_doc_idx is not null');
+    end if;
+
+    euxn_stex.set_debug_hdr('EUXN_DEL_ORD_BCST_IN.REDUCE_DOC');
+
+    ---- FETCH ORDER IDENTIFIER ----
+    with mem_doc_stex(i_doc_idx) as stex do
+      l_clt_doc_id := stex.doc_id;
+    end with;
+
+    if euxn_del_ord_bcst_in_css.do_ovr_compl_clt(i_m) then
+      ---- CUSTOMER SITE SPECIFIC OVERRIDE COMPLETE CLIENT ORDER ----
+      euxn_del_ord_bcst_in_css.ovr_compl_clt(i_m, i_doc_idx);
+    end if;
+
+    ---- REDUCE EXECUTION GROUP ----
+    doc_stex.exec_reduce(
+      i_doc_id                  => l_clt_doc_id
+     ,i_doc_proceed_action_id   => euxn_stex.c_wfa_exec_reduce_id
+     ,i_exec_proceed_action_id  => euxn_stex.c_wfa_exec_reduce_id
+     ,i_exec_disc_action_id     => euxn_stex.c_wfa_exec_disc_id
+     ,i_do_commit               => false
+     ,i_do_sync                 => true
+    );
+
+    if euxn_stex.c_do_debug then
+      euxn_stex.debug('Reduced execution group of order ' || l_clt_doc_id);
+    end if;
+
+  exception
+    when others then
+      err.raise_fa(
+        'euxn_del_ord_bcst_in.reduce_doc'
+       ,'reason'                   ,'failed reducing order'
+       ,'msg_id'                   ,i_m.head.msg_id
+       ,'i_doc_id'                 ,l_clt_doc_id
+       ,'i_doc_proceed_action_id'  ,euxn_stex.c_wfa_exec_reduce_id
+       ,'i_exec_proceed_action_id' ,euxn_stex.c_wfa_exec_reduce_id
+       ,'i_exec_disc_action_id'    ,euxn_stex.c_wfa_exec_disc_id
+      );
+  end reduce_doc;
+
+end euxn_del_ord_bcst_in;

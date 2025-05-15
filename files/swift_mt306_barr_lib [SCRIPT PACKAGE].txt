@@ -1,0 +1,357 @@
+[script 1.0]
+
+public script package swift_mt306_barr_lib
+is
+
+
+  ----------------------------------------------------------------------------
+  -- Return true if the specified barrier type is knock in.
+  --
+  -- @param i_barr_type_id  barrier type
+  ----------------------------------------------------------------------------
+  function barr_type#is_ki(
+    i_barr_type_id                                id code_asset_barr_type
+  ) return boolean
+  is
+  begin
+    return nvl(i_barr_type_id in (code_asset_barr_type.down_in_id, code_asset_barr_type.up_in_id), false);
+  exception
+    when others then
+      session.raise_fa_err('barr_type#is_ki');
+  end barr_type#is_ki;
+
+
+  ----------------------------------------------------------------------------
+  -- Return true if the specified barrier type is knock out.
+  --
+  -- @param i_barr_type_id  barrier type
+  ----------------------------------------------------------------------------
+  function barr_type#is_ko(
+    i_barr_type_id                                id code_asset_barr_type
+  ) return boolean
+  is
+  begin
+    return nvl(i_barr_type_id in (code_asset_barr_type.down_out_id, code_asset_barr_type.up_out_id), false);
+  exception
+    when others then
+      session.raise_fa_err('barr_type#is_ko');
+  end barr_type#is_ko;
+
+
+  ----------------------------------------------------------------------------
+  -- Return true if the specified barrier types are both knock in.
+  --
+  -- @param i_barr_type_1_id  barrier type 1
+  -- @param i_barr_type_2_id  barrier type 2
+  ----------------------------------------------------------------------------
+  function barr_type#is_dbl_ki(
+    i_barr_type_1_id                              id code_asset_barr_type
+   ,i_barr_type_2_id                              id code_asset_barr_type
+  ) return boolean
+  is
+  begin
+    return barr_type#is_ki(i_barr_type_1_id) and barr_type#is_ki(i_barr_type_2_id);
+  exception
+    when others then
+      session.raise_fa_err('barr_type#is_dbl_ki');
+  end barr_type#is_dbl_ki;
+
+
+  ----------------------------------------------------------------------------
+  -- Return true if the specified barrier types are both knock out.
+  --
+  -- @param i_barr_type_1_id  barrier type 1
+  -- @param i_barr_type_2_id  barrier type 2
+  ----------------------------------------------------------------------------
+  function barr_type#is_dbl_ko(
+    i_barr_type_1_id                              id code_asset_barr_type
+   ,i_barr_type_2_id                              id code_asset_barr_type
+  ) return boolean
+  is
+  begin
+    return barr_type#is_ko(i_barr_type_1_id) and barr_type#is_ko(i_barr_type_2_id);
+  exception
+    when others then
+      session.raise_fa_err('barr_type#is_dbl_ko');
+  end barr_type#is_dbl_ko;
+
+
+  ----------------------------------------------------------------------------
+  -- Return true if barrier type 1 is knock in and barrier type 2 is knock out.
+  --
+  -- @param i_barr_type_1_id  barrier type 1
+  -- @param i_barr_type_2_id  barrier type 2
+  ----------------------------------------------------------------------------
+  function barr_type#is_kiko(
+    i_barr_type_1_id                              id code_asset_barr_type
+   ,i_barr_type_2_id                              id code_asset_barr_type
+  ) return boolean
+  is
+  begin
+    return barr_type#is_ki(i_barr_type_1_id) and barr_type#is_ko(i_barr_type_2_id);
+  exception
+    when others then
+      session.raise_fa_err('barr_type#is_kiko');
+  end barr_type#is_kiko;
+
+
+  ----------------------------------------------------------------------------
+  -- Return true if barrier type 1 is knock out and barrier type 2 is knock in.
+  --
+  -- @param i_barr_type_1_id  barrier type 1
+  -- @param i_barr_type_2_id  barrier type 2
+  ----------------------------------------------------------------------------
+  function barr_type#is_koki(
+    i_barr_type_1_id                              id code_asset_barr_type
+   ,i_barr_type_2_id                              id code_asset_barr_type
+  ) return boolean
+  is
+  begin
+    return barr_type#is_ko(i_barr_type_1_id) and barr_type#is_ki(i_barr_type_2_id);
+  exception
+    when others then
+      session.raise_fa_err('barr_type#is_koki');
+  end barr_type#is_koki;
+
+
+  ----------------------------------------------------------------------------
+  -- Return barrier count
+  ----------------------------------------------------------------------------
+  function doc#barr_cnt(
+    doc                                           mem_doc_oofx
+  ) return number
+  is
+  begin
+    return doc.compo_conv.barr_list.count;
+  exception
+    when others then
+      session.raise_fa_err('doc#barr_cnt');
+  end doc#barr_cnt;
+
+
+  ----------------------------------------------------------------------------
+  -- Return barrier type of specified barrier or null if the barrier does not exist.
+  ----------------------------------------------------------------------------
+  function doc#barr_type_id(
+    doc                                           mem_doc_oofx
+   ,i_seq_nr                                      number
+  ) return id code_asset_barr_type
+  is
+  begin
+    if doc.compo_conv.barr_list.count >= i_seq_nr then
+      return doc.compo_conv.barr_list(i_seq_nr).barr_type_id;
+    else
+      return null;
+    end if;
+  exception
+    when others then
+      session.raise_fa_err('doc#barr_type_1_id');
+  end doc#barr_type_id;
+
+
+  ----------------------------------------------------------------------------
+  -- Return true if the order has a double barrier.
+  --
+  -- @param doc     oofx order
+  ----------------------------------------------------------------------------
+  function doc#has_dbl_barr(
+    doc                                           mem_doc_oofx
+  ) return boolean
+  is
+    l_barr_type_1_id                              id code_asset_barr_type;
+    l_barr_type_2_id                              id code_asset_barr_type;
+  begin
+    l_barr_type_1_id := doc#barr_type_id(doc, i_seq_nr => 1);
+    l_barr_type_2_id := doc#barr_type_id(doc, i_seq_nr => 2);
+
+    return doc#barr_cnt(doc) = 2 and (barr_type#is_dbl_ki(l_barr_type_1_id, l_barr_type_2_id) or barr_type#is_dbl_ko(l_barr_type_1_id, l_barr_type_2_id));
+  exception
+    when others then
+      session.raise_fa_err('doc#has_dbl_barr');
+  end doc#has_dbl_barr;
+
+
+  ----------------------------------------------------------------------------
+  -- Return true if the order has a double knock-in barrier.
+  --
+  -- @param doc     oofx order
+  ----------------------------------------------------------------------------
+  function doc#has_dbl_ki_barr(
+    doc                                           mem_doc_oofx
+  ) return boolean
+  is
+  begin
+    return doc#barr_cnt(doc) = 2 and barr_type#is_dbl_ki(doc#barr_type_id(doc, i_seq_nr => 1), doc#barr_type_id(doc, i_seq_nr => 2));
+  exception
+    when others then
+      session.raise_fa_err('doc#has_dbl_ki_barr');
+  end doc#has_dbl_ki_barr;
+
+
+  ----------------------------------------------------------------------------
+  -- Return true if the order has a double knock-out barrier.
+  --
+  -- @param doc     oofx order
+  ----------------------------------------------------------------------------
+  function doc#has_dbl_ko_barr(
+    doc                                           mem_doc_oofx
+  ) return boolean
+  is
+  begin
+    return doc#barr_cnt(doc) = 2 and barr_type#is_dbl_ko(doc#barr_type_id(doc, i_seq_nr => 1), doc#barr_type_id(doc, i_seq_nr => 2));
+  exception
+    when others then
+      session.raise_fa_err('doc#has_dbl_ko_barr');
+  end doc#has_dbl_ko_barr;
+
+
+  ----------------------------------------------------------------------------
+  -- Return true if the order has a single knock-in barrier.
+  --
+  -- @param doc     oofx order
+  ----------------------------------------------------------------------------
+  function doc#has_ki_barr(
+    doc                                           mem_doc_oofx
+  ) return boolean
+  is
+  begin
+    return doc#barr_cnt(doc) = 1 and barr_type#is_ki(doc#barr_type_id(doc, i_seq_nr => 1));
+  exception
+    when others then
+      session.raise_fa_err('doc#has_ki_barr');
+  end doc#has_ki_barr;
+
+
+  ----------------------------------------------------------------------------
+  -- Return true if the order has a single knock-out barrier.
+  --
+  -- @param doc     oofx order
+  ----------------------------------------------------------------------------
+  function doc#has_ko_barr(
+    doc                                           mem_doc_oofx
+  ) return boolean
+  is
+  begin
+    return doc#barr_cnt(doc) = 1 and barr_type#is_ko(doc#barr_type_id(doc, i_seq_nr => 1));
+  exception
+    when others then
+      session.raise_fa_err('doc#has_ko_barr');
+  end doc#has_ko_barr;
+
+
+  ----------------------------------------------------------------------------
+  -- Returns true if the trade has KIKO barriers.
+  ----------------------------------------------------------------------------
+  function doc#has_kiko_barr(
+    doc                                           mem_doc_oofx
+  ) return boolean
+  is
+  begin
+    return doc#barr_cnt(doc) = 2 and barr_type#is_kiko(doc#barr_type_id(doc, i_seq_nr => 1), doc#barr_type_id(doc, i_seq_nr => 2));
+  exception
+    when others then
+      session.raise_fa_err('doc#has_kiko_barr');
+  end doc#has_kiko_barr;
+
+
+  ----------------------------------------------------------------------------
+  -- Returns true if the trade has KOKI barriers.
+  ----------------------------------------------------------------------------
+  function doc#has_koki_barr(
+    doc                                           mem_doc_oofx
+  ) return boolean
+  is
+  begin
+    return doc#barr_cnt(doc) = 2 and barr_type#is_koki(doc#barr_type_id(doc, i_seq_nr => 1), doc#barr_type_id(doc, i_seq_nr => 2));
+  exception
+    when others then
+      session.raise_fa_err('doc#has_koki_barr');
+  end doc#has_koki_barr;
+
+
+  ----------------------------------------------------------------------------
+  -- Return the lower barrier level for a trade with a double barrier.
+  --
+  -- @param doc     oofx order
+  ----------------------------------------------------------------------------
+  function doc#low_barr_lvl(
+    doc                                           mem_doc_oofx
+  ) return number
+  is
+    l_low_lvl                                     number;
+  begin
+    for barr in doc.compo_conv.barr_list loop
+      if barr.lvl < l_low_lvl or l_low_lvl is null then
+        l_low_lvl := barr.lvl;
+      end if;
+    end loop;
+
+    return l_low_lvl;
+  exception
+    when others then
+      session.raise_fa_err('doc#low_barr');
+  end doc#low_barr_lvl;
+
+
+  ----------------------------------------------------------------------------
+  -- Return the upper barrier level for a trade with a double barrier.
+  --
+  -- @param doc     oofx order
+  ----------------------------------------------------------------------------
+  function doc#up_barr_lvl(
+    doc                                           mem_doc_oofx
+  ) return number
+  is
+    l_up_lvl                                      number;
+  begin
+    for barr in doc.compo_conv.barr_list loop
+      if barr.lvl > l_up_lvl or l_up_lvl is null then
+        l_up_lvl := barr.lvl;
+      end if;
+    end loop;
+
+    return l_up_lvl;
+  exception
+    when others then
+      session.raise_fa_err('doc#up_barr');
+  end doc#up_barr_lvl;
+
+
+  ----------------------------------------------------------------------------
+  -- Checks if the specified order is supported by the MT306 message type.
+  -- Currently only checks if the barriers can be accurately represented on the message.
+  --
+  -- @param doc   oofx order
+  ----------------------------------------------------------------------------
+  function doc#is_supp(
+    doc                                           mem_doc_oofx
+  ) return boolean
+  is
+    l_barr_type_1_id                              id code_asset_barr_type;
+    l_barr_type_2_id                              id code_asset_barr_type;
+  begin
+
+    ---- BARRIERS ----
+    -- Too many barriers
+    if doc.compo_conv.barr_list.count > 2 then
+      return false;
+    -- Invalid barrier combination
+    elsif doc.compo_conv.barr_list.count > 1 then
+      l_barr_type_1_id := doc.compo_conv.barr_list(1).barr_type_id;
+      l_barr_type_2_id := doc.compo_conv.barr_list(2).barr_type_id;
+
+      if    not barr_type#is_dbl_ko(l_barr_type_1_id, l_barr_type_2_id)
+        and not barr_type#is_dbl_ki(l_barr_type_1_id, l_barr_type_2_id)
+      then
+        return false;
+      end if;
+    end if;
+
+    return true;
+
+  exception
+    when others then
+      session.raise_fa_err('doc#is_supp');
+  end doc#is_supp;
+
+end swift_mt306_barr_lib;

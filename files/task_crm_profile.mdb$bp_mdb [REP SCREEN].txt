@@ -1,0 +1,578 @@
+[Report 2.0]
+
+report task_crm_profile.mdb$bp_mdb
+
+  ----------------------------------------------------------------------------
+  -- HEADER
+  ----------------------------------------------------------------------------
+  naming
+    dfltlang                            'CRM Desk BP Profile MDB'
+    english                             'CRM Desk BP Profile MDB'
+    german                              'CRM Desk BP Profile MDB'
+
+  user_id                               'CRM_PROFILE_MDB'
+
+  ----------------------------------------------------------------------------
+  -- DATAMART
+  ----------------------------------------------------------------------------
+  datamart
+
+    connect dtm_crm_profile as dp
+
+    group by
+      person                            [nvl(dp.person_id,0)]
+        order by                        [dp.person_name asc]
+
+      bp                                [nvl(dp.bp_id, 0)]
+        order by                        [dp.bp.name asc]
+
+    consolidate
+
+      on person inherit obj_person
+
+      on bp inherit obj_bp
+
+      on top
+        eval_date                       date                assign    [dp.eval_date]
+
+  end datamart
+
+  ----------------------------------------------------------------------------
+  -- LAYOUT
+  ----------------------------------------------------------------------------
+  screen layout
+
+    import native    def;
+    import           util;
+    import           mdb$rep_util;
+    import           rep_lib;
+    import           format;
+
+    on column head
+
+      column col1
+        align                           left
+        label                           null;
+      column col2
+        align                           left
+        label                           null;
+      column col3
+        align                           left
+        label                           null;
+      column col4
+        align                           left
+        label                           null;
+      column col5
+        align                           left
+        label                           null;
+      column col6
+        align                           left
+        label                           null;
+      column col7
+        align                           left
+        label                           null;
+      column col8
+        align                           left
+        label                           null;
+      column col9
+        align                           left
+        label                           null;
+      column col10
+        align                           left
+        label                           null;
+      column col11
+        align                           left
+        label                           null;
+
+    --------------------------------------------------------------------------
+    on top head
+
+      if top.seq_nr is null then
+        column col1                     session.text('LABEL.NODATA_FOUND');
+      else
+        ---- TITLE ----
+        column col1                     rep_lib.title(task_exec);
+        linefeed;
+      end if;
+
+    --------------------------------------------------------------------------
+    on person head
+
+      ---- PERSON NOT SUPPORTED ----
+      if person.id <> 0 then
+        session.raise_ui_err(30105, obj(person.id).obj_type.name);
+      end if;
+
+    --------------------------------------------------------------------------
+    on bp head
+
+      ---- BP BASIC DATA ----
+      style 'title'
+      column col1                       ctx 'bp' bp.id
+                                        bp.name;
+      linefeed;
+      style 'subtitle'
+      column col1                       session.text('LABEL.BASIC') || ' ' || session.text('LABEL.DATA');
+      linefeed;
+      style 'data'
+
+      -- Reference Currency
+      if bp.ref_curry.name is not null then
+        column col1                     session.text('LABEL.REF_CURRY');
+        column col2                     ctx 'asset' bp.ref_curry_id
+                                        bp.ref_curry.name;
+        linefeed;
+      end if;
+
+      -- AuM
+      style 'ready'
+      column col1                       session.text('LABEL.AUM') || ' (in ' || bp.ref_curry.name || ')';
+      if bp.curr_val_bp is null then
+        column col2                     format.qty(0, bp.ref_curry_id, false, false);
+      else
+        column col2                     format.qty(bp.curr_val_bp, bp.ref_curry_id, false, false);
+      end if;
+      linefeed;
+      style 'data'
+
+      --- Language
+      if bp.lang_id is not null then
+        column col1                     session.text('LABEL.LANG');
+        column col2                     ctx 'code' 'code_lang;' || bp.lang_id
+                                        bp.lang.name;
+        linefeed;
+      end if;
+
+      --- Domicile
+      if bp.domi_country_id is not null then
+        column col1                     session.text('LABEL.DOMI');
+        column col2                     ctx 'country' bp.domi_country_id
+                                        bp.domi_country.name;
+        linefeed;
+      end if;
+
+      --- Nationality
+      if bp.nati_country_id is not null then
+        column col1                     session.text('LABEL.NATI');
+        column col2                     ctx 'country' bp.nati_country_id
+                                        bp.nati_country.name;
+        linefeed;
+      end if;
+
+      --- Main Address
+      if bp.main_addr_id is not null then
+        column col1                     session.text('LABEL.MAIN') || ' ' || session.text('LABEL.ADDR') || ' (' ||
+                              session.text('LABEL.BP') || ' ' || session.text('LABEL.LEVEL') || ')';
+        column col2                     ctx 'addr' bp.main_addr_id
+                                        mdb$rep_util.shorten_string_pretty(sds_fmt.replace(bp.main_addr.full_addr, util.rtn, '|'), 60);
+        linefeed;
+      end if;
+
+      --- Open Date
+      if bp.open_date is not null then
+        column col1                     session.text('LABEL.OPEN_DATE');
+        column col2                     session.date_long(bp.open_date);
+        linefeed;
+      end if;
+
+      --- Tax Statement
+      if bp.classif_list.count(71) > 0 then
+        column col1                     bp.class(71).name;
+
+        for classif in bp.classif_list(71) loop
+          column col2                   classif.class.name;
+          linefeed;
+        end loop;
+      end if;
+      linefeed;
+
+      -- BP Additions
+      if bp.add_list.count > 0 then
+        style 'subtitle';
+        column col1                     session.text('LABEL.ADD.P');
+        group
+          collapse
+          style 'subtitle';
+          column col1                   session.text('LABEL.NAME');
+          column col2                   session.text('LABEL.VAL');
+          linefeed;
+
+          style 'data';
+          for add in bp.add_list loop
+            column col1                 add.obj_add.name;
+            column col2                 format.obj_add_val(add);
+            linefeed;
+          end loop;
+        end group;
+      end if;
+
+      -- BP Collections
+      if bp.collect_list.count(collect_type_id => 5405) > 0 or bp.collect_list.count(collect_type_id => 1837) > 0 then
+        style 'subtitle';
+        column col1                     session.text('LABEL.MEMBERSHIP') || ' ' || session.text('LABEL.COLLECT.P');
+        group
+          collapse
+          style 'subtitle';
+          column col1                   session.text('LABEL.TYPE');
+          column col2                   session.text('LABEL.NAME');
+          linefeed;
+
+          style 'data';
+          if bp.collect_list.count(collect_type_id => 1837) > 0 then
+            for coll in bp.collect_list(collect_type_id => 1837) loop
+              column col1               session.text('LABEL.COLLECT_STAT');
+              column col2               ctx 'collect' coll.collect_id
+                                        mdb$rep_util.obj_collect_name_pretty(coll.collect_id);
+              linefeed;
+            end loop;
+          end if;
+
+          if bp.collect_list.count(collect_type_id => 5405) > 0 then
+            for coll in bp.collect_list(collect_type_id => 5405) loop
+              column col1               session.text('LABEL.COLLECT_ENTITY');
+              column col2               ctx 'collect' coll.collect_id
+                                        mdb$rep_util.obj_collect_name_pretty(coll.collect_id);
+              linefeed;
+            end loop;
+          end if;
+        end group;
+      end if;
+
+      --- BP Container
+      style 'subtitle';
+      column col1                       session.text('LABEL.CONT.P');
+      group
+        collapse
+        style 'subtitle';
+        column col1                     session.text('LABEL.NAME');
+        column col2                     session.text('LABEL.ATTNY_POWER');
+        linefeed;
+
+        style 'data';
+        for cont in bp.cont_list(
+          incl_vostri => '+'
+         ,incl_nostri => '+'
+        ) loop
+          column col1                   ctx 'cont' cont.id
+                                        cont.name
+
+          for rel in cont.rel_obj_list(
+            obj_rel_type     => 2
+           ,obj_rel_sub_type => 301
+          ) loop
+            column col2                 ctx 'bp' rel.id
+                                        rel.name
+            linefeed;
+          end loop;
+          linefeed;
+        end loop;
+      end group;
+      linefeed;
+
+      --- BP Third party products
+      if bp.extl_pos_list.count != 0 then
+        style 'title';
+        column col1                     session.text('LABEL.THIRD_PARTY_PROD');
+        linefeed;
+
+        style 'subtitle';
+        column col1                     session.text('LABEL.POTENTIAL');
+        group
+          collapse
+          column col1                   session.text('LABEL.PRODUCT');
+          column col2                   session.text('LABEL.INST');
+          column col3                   session.text('LABEL.QTY');
+          column col4                   session.text('LABEL.INTR_RATE');
+          column col5                   session.text('LABEL.CURRY');
+          column col6                   session.text('LABEL.DUE_DATE');
+          column col7                   session.text('LABEL.REF');
+          column col8                   session.text('LABEL.REMARK');
+          linefeed;
+
+          style 'data';
+          for pos in bp.extl_pos_list loop
+            if pos.is_potential = '+' then
+              column col1               ctx 'prod' pos.prod_id
+                                        pos.prod.name;
+              column col2               ctx 'bp' pos.inst_bp_id
+                                        pos.inst_bp.name;
+              column col3               pos.qty;
+              column col4               pos.intr_rate;
+              column col5               pos.ref_curry.name;
+              column col6               pos.expir_date;
+              column col7               pos.obj_ref.name;
+              column col8               format.fmt_text(
+                                          i_text          => pos.remark
+                                         ,i_max_len       => 100
+                                         ,i_app_ellipsis  => true
+                                         ,i_rtn_repl_text => util.pipe
+                                        );
+              linefeed;
+            end if;
+          end loop;
+        end group;
+
+        style 'subtitle';
+        column col1                     session.text('LABEL.NO_POTENTIAL');
+        group
+          collapse
+          column col1                   session.text('LABEL.PRODUCT');
+          column col2                   session.text('LABEL.INST');
+          column col3                   session.text('LABEL.QTY');
+          column col4                   session.text('LABEL.INTR_RATE');
+          column col5                   session.text('LABEL.CURRY');
+          column col6                   session.text('LABEL.DUE_DATE');
+          column col7                   session.text('LABEL.REF');
+          column col8                   session.text('LABEL.REMARK');
+          linefeed;
+
+          style 'data';
+          for pos in bp.extl_pos_list loop
+            if pos.is_potential = '-' then
+              column col1               ctx 'prod' pos.prod_id
+                                        pos.prod.name;
+              column col2               ctx 'bp' pos.inst_bp_id
+                                        pos.inst_bp.name;
+              column col3               pos.qty;
+              column col4               pos.intr_rate;
+              column col5               pos.ref_curry.name;
+              column col6               pos.expir_date;
+              column col7               pos.obj_ref.name;
+              column col8               format.fmt_text(
+                                          i_text          => pos.remark
+                                         ,i_max_len       => 100
+                                         ,i_app_ellipsis  => true
+                                         ,i_rtn_repl_text => util.pipe
+                                        );
+              linefeed;
+            end if;
+          end loop;
+        end group;
+      end if;
+
+      -- Last Payment Orders
+      -- Remarks: Check issue will appear twice: benef_bp and from_bp
+      --          Go through the bookings always for 10 days starting with today until 1 month back
+      --          Maximum Payments: In case that not yet 10 Payment orders are being found, the next search (-10 days) will start
+      linefeed;
+      style 'title'
+      column col1                       session.text('LABEL.LAST') || ' ' || session.text('LABEL.PAY_ORD') || ' (' ||
+                            session.text('LABEL.LAST') || ' ' || session.text('LABEL.MONTH') || ')';
+      column col2                       session.text('LABEL.ORDER_TYPE');
+      column col3                       session.text('LABEL.CURRY');
+      column col4                       session.text('LABEL.AMOUNT');
+      column col5                       session.text('LABEL.ACC');
+      column col6                       session.text('LABEL.STATUS');
+      linefeed;
+      style 'data';
+
+      declare
+        l_pay_id                                  id doc_pay;
+        l_book_cnt                                number     := 0;
+        l_sop_date                                date       := sysdate;
+        l_eop_date                                date       := sysdate + 10;
+      begin
+
+        while l_book_cnt < 10 and l_sop_date > sysdate - 30 loop
+          l_sop_date := l_sop_date - 10;
+          l_eop_date := l_eop_date - 10;
+
+          for cont in bp.cont_list(
+            incl_vostri => '+'
+           ,incl_nostri => '+'
+          ) loop
+            -- Loop through the positions of the container in question
+            for pos in cont.pos_list loop
+              if pos.obj_sub_type_id in (1, 37) then -- Only Current Position and Contract (no Interim Accounts)
+                -- Loop through the position bookings of the position in question (taking the performance date)
+                for book in pos.book_list(
+                  date_type_id => 6
+                 ,sop          => l_sop_date
+                 ,eop          => l_eop_date
+                ).entry_list loop
+                  if book.evt.meta_typ_id = 6 and book.evt.order_type_id > 0 then -- Meta_Typ = Payment (no Mass Payment)
+                    l_book_cnt := l_book_cnt + 1;
+                    l_pay_id   := book.evt.doc_id;
+
+                    begin
+                      with doc_pay(l_pay_id) as pay_order do
+                        column col1     ctx 'doc' book.evt.doc_id
+                                        book.evt.doc_id || '   ' ||
+                                                    session.date_long(pay_order.perf_date) || '   ' || pay_order.ins_by_sec_user.oracle_user;
+                        column col2     book.evt.order_type.name; -- session.fld('code_order_type', book.evt.order_type_id);
+                        column col3     pay_order.curry.name;
+                        column col4     format.qty(pay_order.amount, pos.asset_id, false, false);
+                        column col5     pay_order.deb_macc.name;
+                        column col6     session.fld('wfc_status', pay_order.wfc_status_id, 'name', 'meta_typ_id = 6');
+                      end with;
+                    end;
+                    linefeed;
+                  end if;
+                end loop;
+              end if;
+            end loop;
+          end loop;
+        end loop;
+
+        if l_book_cnt = 0 then
+          column col1                   session.text('LABEL.NO_BOOKINGS_AVAILABLE');
+          linefeed;
+        end if;
+        linefeed;
+      end;
+
+      -- Last Stex Orders
+      -- Remarks: Go through the bookings always for 10 days starting with today until 1 month back
+      --          Maximum Stex Orders: In case that not yet 10 Stex orders are being found, the next search (-10 days) will start
+      --          Stex Orders without bookings are not displayed
+      style 'title'
+      column col1                       session.text('LABEL.LAST') || ' ' || session.text('LABEL.STOCK_ORD') || ' (' ||
+                            session.text('LABEL.LAST') || ' ' || session.text('LABEL.MONTH') || ')';
+      column col2                       session.text('LABEL.MARKET');
+      column col3                       session.text('LABEL.CURRY');
+      column col4                       session.text('LABEL.TYPE');
+      column col5                       session.text('LABEL.ASSET');
+      column col6                       session.text('LABEL.QTY');
+      column col7                       session.text('LABEL.LIMIT');
+      column col8                       session.text('LABEL.EXPIR_DATE.S');
+      column col9                       session.text('LABEL.OPEN');
+      column col10                      session.text('LABEL.PRICE');
+      column col11                      session.text('LABEL.STATUS');
+      linefeed;
+      style 'data'
+
+      declare
+        l_stex_id                                 id doc_stex;
+        l_book_cnt                                number      := 0;
+        l_sop_date                                date        := sysdate;
+        l_eop_date                                date        := sysdate + 10;
+      begin
+        while l_book_cnt < 10 and l_sop_date > sysdate - 30 loop
+          l_sop_date := l_sop_date - 10;
+          l_eop_date := l_eop_date - 10;
+
+          for cont in bp.cont_list(
+            incl_vostri => '+'
+           ,incl_nostri => '+'
+          ) loop
+            -- Loop through the positions of the container in question
+            for pos in cont.pos_list loop
+              if pos.obj_sub_type_id = 2 then -- Only Security
+                -- Loop through the position bookings of the position in question (last month)
+                for book in pos.book_list(
+                  date_type_id => 1
+                 ,sop          => l_sop_date
+                 ,eop          => l_eop_date
+                ).entry_list loop
+                  if book.evt.meta_typ_id = 1 and book.evt.order_type_id > 0 then
+                    l_book_cnt := l_book_cnt + 1;
+                    l_stex_id  := book.evt.doc_id;
+
+                    begin
+                      with doc_stex(l_stex_id) as stex_order do
+                        column col1     ctx 'doc' book.evt.doc_id
+                                        book.evt.doc_id || '   ' ||
+                                                    session.date_long(stex_order.order_date) || '   ' || stex_order.ins_by_sec_user.oracle_user;
+                        column col2     ctx 'market' stex_order.mkt_id
+                                        stex_order.mkt.name;
+                        column col3     stex_order.trade_curry.name;
+                        column col4     book.evt.order_type.name;
+                        column col5     ctx 'asset' stex_order.asset_id
+                                        stex_order.asset.name;
+                        column col6     format.qty(stex_order.qty, pos.asset_id, false, false);
+                        column col7     stex_order.limit;
+                        column col8     session.date_short(stex_order.expir_date);
+                        column col9     stex_order.qty - stex_order.exec_link_executed_qty;
+                        column col10    stex_order.price_clt;
+                        column col11    session.fld('wfc_status', stex_order.wfc_status_id, 'name', 'meta_typ_id = 1');
+                      end with;
+                    end;
+                    linefeed;
+                  end if;
+                end loop;
+              end if;
+            end loop;
+          end loop;
+        end loop;
+
+        if l_book_cnt = 0 then
+          column col1                   session.text('LABEL.NO_BOOKINGS_AVAILABLE');
+          linefeed;
+        end if;
+
+        linefeed;
+      end;
+
+      -- Last 3 Contact Orders
+      declare
+        l_ctact_cnt                               number := 0;
+      begin
+        style 'title'
+        column col1                     session.text('LABEL.LAST') || ' 5 ' || session.text('LABEL.CONTACT_ORD');
+        column col2                     session.text('LABEL.TITLE');
+        column col3                     session.text('LABEL.CONTACT_TYPE');
+        column col4                     session.text('LABEL.STATUS');
+        linefeed;
+        style 'data';
+
+        for ctact in bp.ctact_list(top.eval_date, 5) loop
+          l_ctact_cnt := l_ctact_cnt + 1;
+          column col1                   ctx 'doc' ctact.id
+                                        ctact.id || '   ' || session.date_long(ctact.ctact_date) || '   ' || ctact.ins_by_sec_user.oracle_user;
+          column col2                   format.fmt_text(
+                                          i_text          => ctact.title
+                                         ,i_max_len       => 60
+                                         ,i_app_ellipsis  => true
+                                         ,i_rtn_repl_text => util.pipe
+                                        );
+          column col3                   ctx 'code' 'code_ctact_type;' || ctact.ctact_type_id
+                                        ctact.ctact_type.name;
+          column col4                   session.fld('wfc_status', ctact.wfc_status_id, 'name', 'meta_typ_id = 214');
+          linefeed;
+        end loop;
+
+        if l_ctact_cnt = 0 then
+          column col1                   session.text('LABEL.NO_CTACT_AVAILABLE');
+          linefeed;
+        end if;
+        linefeed;
+      end;
+
+      -- Last 3 Issue Orders
+      declare
+        l_issue_cnt                               number := 0;
+      begin
+        style 'title'
+        column col1                     session.text('LABEL.LAST') || ' 5 ' || session.text('LABEL.ISSUE_ORD');
+        column col2                     session.text('LABEL.DEAD');
+        column col3                     session.text('LABEL.SUBJECT');
+        column col4                     session.text('LABEL.STATUS');
+        linefeed;
+        style 'data'
+
+        for issue in bp.crm_issue_list('+', 5) loop
+          l_issue_cnt := l_issue_cnt + 1;
+          column col1                   ctx 'doc' issue.id
+                                        issue.id
+                           || '   ' || session.date_long(issue.open_date) || '   ' || issue.ins_by_sec_user.oracle_user;
+          column col2                   session.date_short(issue.due_date);
+          column col3                   format.fmt_text(
+                                          i_text          => issue.subject
+                                         ,i_max_len       => 35
+                                         ,i_app_ellipsis  => true
+                                         ,i_rtn_repl_text => util.pipe
+                                        );
+          column col4                   session.fld('wfc_status', issue.wfc_status_id, 'name', 'meta_typ_id = 215');
+          linefeed;
+        end loop;
+
+        if l_issue_cnt = 0 then
+          column col1                   session.text('LABEL.NO_ISSUE_AVAILABLE');
+          linefeed;
+        end if;
+        linefeed;
+      end;
+
+  end layout
+
+end report

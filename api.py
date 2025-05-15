@@ -90,7 +90,10 @@ class FileLister(Resource):
 @ns.route('/read')
 class FileReader(Resource):
     @ns.doc('read_file',
-            params={'filename': 'Name of the file to read'},
+            params={
+                'filename': 'Name of the file to read',
+                'session_id': 'Session ID to look for files in session-specific directory'
+            },
             responses={
                 200: 'Success',
                 400: 'Invalid file name',
@@ -99,12 +102,23 @@ class FileReader(Resource):
     def get(self):
         """Read the content of a file"""
         filename = request.args.get('filename', '')
+        session_id = request.args.get('session_id', '')
         
         if not filename:
             return jsonify({'content': '', 'filename': '', 'status': 'Error: No file name provided'}), 400
             
         try:
-            filepath = os.path.join('files', filename)
+            # First try to find file in session directory if session_id is provided
+            if session_id:
+                session_filepath = os.path.join('files', session_id, filename)
+                if os.path.exists(session_filepath):
+                    filepath = session_filepath
+                else:
+                    # Fall back to main files directory
+                    filepath = os.path.join('files', filename)
+            else:
+                filepath = os.path.join('files', filename)
+
             if not os.path.exists(filepath):
                 return jsonify({'content': '', 'filename': filename, 'status': 'Error: File not found'}), 404
                 
@@ -138,12 +152,16 @@ class FileComparer(Resource):
             })
     @ns.expect(ns.model('CompareFiles', {
         'file1_content': fields.String(required=True, description='Content of first file'),
-        'file2_content': fields.String(required=True, description='Content of second file')
+        'file2_content': fields.String(required=True, description='Content of second file'),
+        'file1_name': fields.String(required=True, description='Name of first file')
     }))
     def post(self):
         """Compare the content of two files or provided content"""
-        file1_content = request.get_json().get('file1_content', '')
-        file2_content = request.get_json().get('file2_content', '')
+        data = request.get_json()
+        file1_content = data.get('file1_content', '')
+        file2_content = data.get('file2_content', '')
+        file1_name = data.get('file1_name', '')
+        file2_name = data.get('file2_name', '')
                 
         try:
             # If content is provided directly, use it
@@ -204,7 +222,8 @@ class FileComparer(Resource):
                 with open(filepath, 'w', encoding='utf-8') as f:
                     f.write(render_template('file_diff.html', 
                         original_lines=original_lines,
-                        modified_lines=modified_lines
+                        modified_lines=modified_lines,
+                        file1_name=file1_name
                     ))
             except Exception as e:
                 return jsonify({'status': f'Error saving diff file: {str(e)}'}), 500
@@ -215,7 +234,8 @@ class FileComparer(Resource):
                 'status': 'Success',
                 'diff_url': diff_url,
                 'original_lines': original_lines,
-                'modified_lines': modified_lines
+                'modified_lines': modified_lines,
+                'file1_name': file1_name
             })
             
         except Exception as e:
@@ -280,6 +300,49 @@ def pdf_to_text(pdf_path, txt_path=None):
         print(f"Text saved to {txt_path}")
     else:
         print(all_text)
+
+@ns.route('/write')
+class FileWriter(Resource):
+    @ns.doc('write_file',
+            responses={
+                200: 'Success',
+                400: 'Invalid input',
+                500: 'File writing error'
+            })
+    @ns.expect(ns.model('WriteFile', {
+        'file_content': fields.String(required=True, description='Content to write to file'),
+        'file_name': fields.String(required=True, description='Name of the file to write'),
+        'session_id': fields.String(required=True, description='Session ID for file location')
+    }))
+    def post(self):
+        """Write content to a file in the session directory"""
+        try:
+            data = request.get_json()
+            file_content = data.get('file_content', '')
+            file_name = data.get('file_name', '')
+            session_id = data.get('session_id', '')
+
+            if not file_name:
+                return jsonify({'status': 'Error: No file name provided'}), 400
+            if not session_id:
+                return jsonify({'status': 'Error: No session ID provided'}), 400
+
+            # Create session directory if it doesn't exist
+            session_dir = os.path.join('files', session_id)
+            os.makedirs(session_dir, exist_ok=True)
+
+            # Write file to session directory
+            file_path = os.path.join(session_dir, file_name)
+            with open(file_path, 'w', encoding='utf-8') as file:
+                file.write(file_content)
+
+            return jsonify({
+                'status': 'Success',
+                'file_path': file_path
+            })
+
+        except Exception as e:
+            return jsonify({'status': f'Error: {str(e)}'}), 500
 
 if __name__ == '__main__':
     # Create files directory if it doesn't exist

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>File Comparison</title>
+    <title>Source Comparison: {{ file1_name }}</title>
     <style>
         :root {
             --add-bg: #e6ffed;
@@ -158,7 +158,7 @@
     <div class="diff-container">
         <div class="diff-header">
             <h2>Source Comparison</h2>
-            <button id="toggle-diff-btn" onclick="toggleDiff()">只显示差异</button>
+            <button id="toggle-diff-btn" onclick="toggleDiff()">Show diff only</button>
         </div>
         <div class="diff-content">
             <div class="diff-side">
@@ -197,7 +197,7 @@ function toggleDiff() {
         btn.textContent = 'Show All';
     } else {
         contextLines.forEach(line => line.style.display = '');
-        btn.textContent = 'Show Diff';
+        btn.textContent = 'Show diff only';
     }
 }
 </script>
